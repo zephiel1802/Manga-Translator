@@ -11,7 +11,7 @@ import sys
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from detect_bubbles import detect_bubbles
-from process_bubble import process_bubble, process_bubble_auto, is_dark_bubble
+from process_bubble import process_bubble, process_bubble_auto, is_dark_bubble, get_bubble_background_color, get_dominant_color, process_bubble_preserve_gradient
 from translator.translator import MangaTranslator
 from translator.context_memory import ContextMemory
 from add_text import add_text
@@ -138,13 +138,14 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
         text = mocr(im)
         
         # Use auto detection or forced dark based on detection flag
-        detected_image, cont, bubble_is_dark = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+        detected_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
         
         bubble_data.append({
             'detected_image': detected_image,
             'contour': cont,
             'coords': (int(x1), int(y1), int(x2), int(y2)),
-            'is_dark': bubble_is_dark
+            'is_dark': bubble_is_dark,
+            'fill_color': detected_color
         })
         texts_to_translate.append(text)
     
@@ -302,14 +303,15 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             all_bubble_images.append(Image.fromarray(detected_image.copy()))
             bubble_mapping.append((name, bubble_idx))
             
-            # Process bubble (fill white or black based on type)
-            processed_image, cont, bubble_is_dark = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+            # Process bubble (fill with auto-detected or specified color based on type)
+            processed_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
             
             bubble_data.append({
                 'detected_image': processed_image,
                 'contour': cont,
                 'coords': (int(x1), int(y1), int(x2), int(y2)),
-                'is_dark': bubble_is_dark
+                'is_dark': bubble_is_dark,
+                'fill_color': detected_color
             })
         
         all_pages_data[name] = {
