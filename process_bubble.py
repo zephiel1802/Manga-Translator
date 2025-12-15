@@ -42,37 +42,155 @@ def get_dominant_color(image, mask=None):
     return tuple(int(c) for c in dominant_color)
 
 
+def get_color_by_histogram(pixels, bins=32):
+    """
+    Find dominant color using histogram binning.
+    More accurate than simple mean/median for multimodal distributions.
+    
+    Args:
+        pixels: Array of pixel colors (N, 3)
+        bins: Number of bins per channel
+        
+    Returns:
+        tuple: Dominant color as (B, G, R)
+    """
+    if len(pixels) == 0:
+        return (255, 255, 255)
+    
+    # Create 3D histogram
+    hist_b = np.histogram(pixels[:, 0], bins=bins, range=(0, 256))[0]
+    hist_g = np.histogram(pixels[:, 1], bins=bins, range=(0, 256))[0]
+    hist_r = np.histogram(pixels[:, 2], bins=bins, range=(0, 256))[0]
+    
+    # Find peak bin for each channel
+    bin_width = 256 // bins
+    b_peak = np.argmax(hist_b) * bin_width + bin_width // 2
+    g_peak = np.argmax(hist_g) * bin_width + bin_width // 2
+    r_peak = np.argmax(hist_r) * bin_width + bin_width // 2
+    
+    return (int(b_peak), int(g_peak), int(r_peak))
+
+
+def get_color_by_mode(pixels):
+    """
+    Find the most frequent color (mode) in pixel array.
+    Uses color quantization to group similar colors.
+    
+    Args:
+        pixels: Array of pixel colors (N, 3)
+        
+    Returns:
+        tuple: Most frequent color as (B, G, R)
+    """
+    if len(pixels) == 0:
+        return (255, 255, 255)
+    
+    # Quantize colors (reduce to 32 levels per channel)
+    quantized = (pixels // 8) * 8
+    
+    # Convert to hashable format for counting
+    color_codes = quantized[:, 0] * 65536 + quantized[:, 1] * 256 + quantized[:, 2]
+    
+    # Find most frequent
+    unique, counts = np.unique(color_codes, return_counts=True)
+    most_freq_code = unique[np.argmax(counts)]
+    
+    # Decode back to BGR
+    b = (most_freq_code // 65536) % 256
+    g = (most_freq_code // 256) % 256
+    r = most_freq_code % 256
+    
+    return (int(b), int(g), int(r))
+
+
 def get_bubble_background_color(image, sample_border=True):
     """
-    Detect speech bubble background color by analyzing border region.
+    Detect speech bubble background color by analyzing center region.
+    Since bounding box is larger than actual bubble, we sample from center
+    (inside the bubble) and filter out text pixels.
     
     Args:
         image: Input bubble image (BGR)
-        sample_border: If True, sample from border region of image
+        sample_border: Legacy param, ignored - always samples from center now
         
     Returns: 
         tuple: Background color as (B, G, R)
     """
     h, w = image.shape[:2]
     
-    if sample_border:
-        # Sample from image edges (usually the background)
-        border_size = max(5, min(h, w) // 10)
+    # ===== Sample from CENTER region (inside the bubble) =====
+    # Avoid edges since bbox is larger than actual bubble
+    margin_y = max(10, h // 5)  # 20% margin from top/bottom
+    margin_x = max(10, w // 5)  # 20% margin from left/right
+    
+    # Get center region
+    center_region = image[margin_y:h-margin_y, margin_x:w-margin_x]
+    
+    if center_region.size == 0:
+        # Fallback if image too small
+        center_region = image
+    
+    center_pixels = center_region.reshape(-1, 3)
+    
+    # ===== Filter out text pixels =====
+    # Text is usually very dark (black) or very bright (white)
+    # Keep only mid-range pixels that are likely background
+    gray_values = np.mean(center_pixels, axis=1)
+    
+    # Check if this looks like a dark bubble or light bubble
+    median_gray = np.median(gray_values)
+    
+    if median_gray > 128:
+        # Light bubble (white/light bg, dark text)
+        # Keep pixels that are bright (background), remove dark (text)
+        bg_mask = gray_values > 180
+    else:
+        # Dark bubble (dark bg, white/light text)
+        # Keep pixels that are dark (background), remove bright (text)
+        bg_mask = gray_values < 80
+    
+    # Apply mask to get background pixels only
+    if np.sum(bg_mask) > 100:
+        bg_pixels = center_pixels[bg_mask]
+    else:
+        # Not enough pixels after filtering, use all center pixels
+        bg_pixels = center_pixels
+    
+    collected_colors = []
+    
+    # ===== Get colors using different methods =====
+    
+    # Method 1: Mode from filtered background pixels
+    color_mode = get_color_by_mode(bg_pixels)
+    collected_colors.append(color_mode)
+    
+    # Method 4: Histogram from center region
+    color_hist = get_color_by_histogram(bg_pixels, bins=32)
+    collected_colors.append(color_hist)
+    
+    # Method: Median (as fallback reference)
+    color_median = tuple(int(c) for c in np.median(bg_pixels, axis=0))
+    collected_colors.append(color_median)
+    
+    # ===== Vote for final color =====
+    collected_colors = np.array(collected_colors)
+    
+    # Find color with minimum total distance to others (consensus)
+    best_color = collected_colors[0]
+    min_total_dist = float('inf')
+    
+    for i, color in enumerate(collected_colors):
+        total_dist = 0
+        for j, other_color in enumerate(collected_colors):
+            if i != j:
+                dist = np.sum(np.abs(color.astype(int) - other_color.astype(int)))
+                total_dist += dist
         
-        # Collect pixels from 4 edges
-        top = image[:border_size, :].reshape(-1, 3)
-        bottom = image[-border_size:, :].reshape(-1, 3)
-        left = image[:, :border_size].reshape(-1, 3)
-        right = image[:, -border_size:].reshape(-1, 3)
-        
-        border_pixels = np.vstack([top, bottom, left, right])
-        
-        # Calculate median color of border pixels
-        # Use median to avoid influence of outliers (text)
-        bg_color = tuple(int(c) for c in np.median(border_pixels, axis=0))
-        return bg_color
-    else: 
-        return get_dominant_color(image)
+        if total_dist < min_total_dist:
+            min_total_dist = total_dist
+            best_color = color
+    
+    return tuple(int(c) for c in best_color)
 
 
 def is_dark_bubble(image, threshold=100):
