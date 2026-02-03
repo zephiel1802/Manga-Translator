@@ -2,6 +2,7 @@ from deep_translator import GoogleTranslator
 from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 import translators as ts
 import torch
+import threading
 
 
 class MangaTranslator:
@@ -33,9 +34,16 @@ class MangaTranslator:
             "gemini": self._translate_with_gemini
         }
         # Lazy loading for heavy models
-        self._nllb_model = None
-        self._nllb_tokenizer = None
+        # self._nllb_model and self._nllb_tokenizer are now cached in _model_cache
         self._gemini_translator = None
+
+    # Class-level cache for heavy models (shared across instances)
+    _model_cache = {
+        "nllb_model": None,
+        "nllb_tokenizer": None,
+        "hf_pipeline": None
+    }
+    _nllb_lock = threading.Lock()
 
     def set_languages(self, source=None, target=None):
         """Update source and/or target languages."""
@@ -73,12 +81,12 @@ class MangaTranslator:
 
     def _translate_with_hf(self, text):
         # Lazy load HF pipeline (cache it like NLLB)
-        if not hasattr(self, '_hf_pipeline') or self._hf_pipeline is None:
+        if self._model_cache["hf_pipeline"] is None:
             print("Loading HuggingFace translation model (first time)...")
-            self._hf_pipeline = pipeline("translation", model="Helsinki-NLP/opus-mt-ja-en")
+            self._model_cache["hf_pipeline"] = pipeline("translation", model="Helsinki-NLP/opus-mt-ja-en")
             print("HF pipeline loaded and cached!")
         
-        translated_text = self._hf_pipeline(text)[0]["translation_text"]
+        translated_text = self._model_cache["hf_pipeline"](text)[0]["translation_text"]
         return translated_text if translated_text is not None else text
 
     def _translate_with_baidu(self, text):
@@ -98,14 +106,14 @@ class MangaTranslator:
 
     def _load_nllb_model(self):
         """Lazy load NLLB model only when first needed (saves memory)"""
-        if self._nllb_model is None:
+        if self._model_cache["nllb_model"] is None:
             print("Loading NLLB model (first time, may take a moment)...")
             model_name = "facebook/nllb-200-distilled-600M"
-            self._nllb_tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self._nllb_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+            self._model_cache["nllb_tokenizer"] = AutoTokenizer.from_pretrained(model_name)
+            self._model_cache["nllb_model"] = AutoModelForSeq2SeqLM.from_pretrained(model_name)
             # Force CPU for stability
-            self._nllb_model = self._nllb_model.to("cpu")
-            self._nllb_model.eval()
+            self._model_cache["nllb_model"] = self._model_cache["nllb_model"].to("cpu")
+            self._model_cache["nllb_model"].eval()
             print("NLLB model loaded successfully!")
 
     def _translate_with_nllb(self, text):
@@ -120,22 +128,24 @@ class MangaTranslator:
             src_lang = self.NLLB_LANG_CODES.get(self.source, "jpn_Jpan")
             tgt_lang = self.NLLB_LANG_CODES.get(self.target, "eng_Latn")
             
-            # Set source language
-            self._nllb_tokenizer.src_lang = src_lang
+            tokenizer = self._model_cache["nllb_tokenizer"]
+            model = self._model_cache["nllb_model"]
             
-            # Tokenize
-            inputs = self._nllb_tokenizer(text, return_tensors="pt", padding=True)
+            # Set source language and tokenize (thread-safe)
+            with self._nllb_lock:
+                tokenizer.src_lang = src_lang
+                inputs = tokenizer(text, return_tensors="pt", padding=True)
             
             # Generate translation
             with torch.no_grad():
-                translated_tokens = self._nllb_model.generate(
+                translated_tokens = model.generate(
                     **inputs,
-                    forced_bos_token_id=self._nllb_tokenizer.convert_tokens_to_ids(tgt_lang),
+                    forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang),
                     max_length=256
                 )
             
             # Decode
-            translated_text = self._nllb_tokenizer.batch_decode(
+            translated_text = tokenizer.batch_decode(
                 translated_tokens, skip_special_tokens=True
             )[0]
             

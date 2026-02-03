@@ -57,6 +57,11 @@ MODEL_PATH = "model/model.pt"
 # Default max height for split (1.5x width = landscape-ish ratio)
 DEFAULT_SPLIT_HEIGHT_RATIO = 2.0
 
+# Global cache for OCR instances
+_OCR_CACHE = {
+    "chrome_lens": None,
+    "manga_ocr": None
+}
 
 def split_long_image(image: np.ndarray, max_height_ratio: float = DEFAULT_SPLIT_HEIGHT_RATIO) -> list:
     """
@@ -575,9 +580,13 @@ def upload_file():
         print(f"Using Local LLM: {copilot_server} / model: {copilot_model}")
     
     if selected_ocr == "chrome-lens":
-        mocr = ChromeLensOCR()
+        if _OCR_CACHE["chrome_lens"] is None:
+            _OCR_CACHE["chrome_lens"] = ChromeLensOCR()
+        mocr = _OCR_CACHE["chrome_lens"]
     else:
-        mocr = MangaOcr()
+        if _OCR_CACHE["manga_ocr"] is None:
+            _OCR_CACHE["manga_ocr"] = MangaOcr()
+        mocr = _OCR_CACHE["manga_ocr"]
     
     # Initialize font analyzer for auto font matching
     font_analyzer = None
