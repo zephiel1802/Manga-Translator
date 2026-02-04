@@ -204,7 +204,8 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     
     else:
         # Single translation for other translators
-        translated_texts = [manga_translator.translate(t, method=selected_translator) for t in texts_to_translate]
+        # Optimized: Use batch translation if available (e.g. for NLLB)
+        translated_texts = manga_translator.translate_batch(texts_to_translate, method=selected_translator)
     
     # Phase 3: Add translated text to bubbles
     # Determine correct font path based on font name
