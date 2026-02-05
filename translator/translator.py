@@ -73,6 +73,33 @@ class MangaTranslator:
             return translator_func(self._preprocess_text(text))
         else:
             raise ValueError("Invalid translation method.")
+
+    def translate_batch(self, texts, method="google"):
+        """
+        Translates a list of texts using the specified method.
+        Optimized for batch processing where supported (NLLB, HF).
+
+        Args:
+            texts (list): List of strings to translate.
+            method (str): Translation method.
+
+        Returns:
+            list: List of translated strings.
+        """
+        if not texts:
+            return []
+
+        if method not in self.translators:
+            raise ValueError("Invalid translation method.")
+
+        # Batch-optimized methods
+        if method == "nllb":
+            return self._translate_batch_with_nllb(texts)
+        elif method == "hf":
+            return self._translate_batch_with_hf(texts)
+
+        # Fallback to sequential for others
+        return [self.translate(text, method) for text in texts]
             
     def _translate_with_google(self, text):
         translator = GoogleTranslator(source=self.source, target=self.target)
@@ -154,6 +181,63 @@ class MangaTranslator:
         except Exception as e:
             print(f"NLLB translation error: {e}")
             return text
+
+    def _translate_batch_with_nllb(self, texts):
+        """
+        Batch translate using NLLB-200 model.
+        Significantly faster than sequential processing.
+        """
+        try:
+            self._load_nllb_model()
+
+            src_lang = self.NLLB_LANG_CODES.get(self.source, "jpn_Jpan")
+            tgt_lang = self.NLLB_LANG_CODES.get(self.target, "eng_Latn")
+
+            tokenizer = self._model_cache["nllb_tokenizer"]
+            model = self._model_cache["nllb_model"]
+
+            # Preprocess
+            preprocessed = [self._preprocess_text(t) for t in texts]
+
+            with self._nllb_lock:
+                tokenizer.src_lang = src_lang
+                inputs = tokenizer(preprocessed, return_tensors="pt", padding=True, truncation=True)
+                inputs = inputs.to(model.device)
+
+            with torch.no_grad():
+                translated_tokens = model.generate(
+                    **inputs,
+                    forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang),
+                    max_length=256
+                )
+
+            translated_texts = tokenizer.batch_decode(
+                translated_tokens, skip_special_tokens=True
+            )
+
+            return translated_texts
+
+        except Exception as e:
+            print(f"NLLB batch translation error: {e}")
+            # Fallback to sequential
+            return [self._translate_with_nllb(t) for t in texts]
+
+    def _translate_batch_with_hf(self, texts):
+        """Batch translate using HuggingFace pipeline."""
+        # Lazy load HF pipeline
+        if self._model_cache["hf_pipeline"] is None:
+            self._translate_with_hf("warmup") # Trigger loading
+
+        # Preprocess all texts
+        preprocessed = [self._preprocess_text(t) for t in texts]
+
+        # Pipeline handles batching
+        try:
+            results = self._model_cache["hf_pipeline"](preprocessed)
+            return [r["translation_text"] for r in results]
+        except Exception as e:
+            print(f"HF batch translation error: {e}")
+            return [self._translate_with_hf(t) for t in texts]
 
     def _translate_with_gemini(self, text):
         """
