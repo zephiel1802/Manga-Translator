@@ -73,6 +73,20 @@ class MangaTranslator:
             return translator_func(self._preprocess_text(text))
         else:
             raise ValueError("Invalid translation method.")
+
+    def translate_batch(self, texts: list, method="google") -> list:
+        """
+        Translates a list of texts using batch processing if available.
+        Falls back to sequential translation if batching is not supported for the method.
+        """
+        if not texts:
+            return []
+
+        if method == "nllb":
+            return self._translate_batch_with_nllb(texts)
+
+        # Fallback to sequential translation
+        return [self.translate(text, method) for text in texts]
             
     def _translate_with_google(self, text):
         translator = GoogleTranslator(source=self.source, target=self.target)
@@ -154,6 +168,49 @@ class MangaTranslator:
         except Exception as e:
             print(f"NLLB translation error: {e}")
             return text
+
+    def _translate_batch_with_nllb(self, texts):
+        """
+        Batch translation using NLLB model.
+        Significantly faster for multiple bubbles.
+        """
+        try:
+            self._load_nllb_model()
+
+            src_lang = self.NLLB_LANG_CODES.get(self.source, "jpn_Jpan")
+            tgt_lang = self.NLLB_LANG_CODES.get(self.target, "eng_Latn")
+
+            tokenizer = self._model_cache["nllb_tokenizer"]
+            model = self._model_cache["nllb_model"]
+
+            # Preprocess all texts
+            preprocessed_texts = [self._preprocess_text(text) for text in texts]
+
+            # Set source language and tokenize batch (thread-safe)
+            with self._nllb_lock:
+                tokenizer.src_lang = src_lang
+                # padding=True pads to the longest sequence in the batch
+                # truncation=True ensures we don't exceed model limits
+                inputs = tokenizer(preprocessed_texts, return_tensors="pt", padding=True, truncation=True)
+
+            # Generate translations
+            with torch.no_grad():
+                translated_tokens = model.generate(
+                    **inputs,
+                    forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang),
+                    max_length=256
+                )
+
+            # Decode batch
+            translated_texts = tokenizer.batch_decode(
+                translated_tokens, skip_special_tokens=True
+            )
+
+            return translated_texts
+
+        except Exception as e:
+            print(f"NLLB batch translation error: {e}, falling back to sequential")
+            return [self._translate_with_nllb(t) for t in texts]
 
     def _translate_with_gemini(self, text):
         """
