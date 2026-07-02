@@ -179,6 +179,15 @@
             </label>
          </div>
 
+         <!-- SFX filter (Extract Text Only) -->
+         <div class="select-wrapper full-width" style="margin-top: 10px;">
+            <label class="toggle-container">
+               <input type="checkbox" id="filter_sfx" name="filter_sfx" checked>
+               <span class="toggle-slider"></span>
+               <span class="toggle-label">🎨 Lọc SFX / âm thanh khi Extract Text (bỏ RUSTLE, ARF!… — dùng Gemini nếu có API key)</span>
+            </label>
+         </div>
+
          <!-- Custom Prompt (show when Custom selected) -->
          <div class="select-wrapper full-width" id="custom-prompt-wrapper" style="display: none;">
             <label class="translator-label">Custom Prompt</label>
@@ -236,6 +245,9 @@
          <input type="hidden" id="selected_font" name="selected_font">
          <input type="hidden" id="selected_ocr" name="selected_ocr">
          <button type="submit">Translate</button>
+         <button type="button" id="extract-text-btn" style="margin-top: 8px; background: #444;">
+            📝 Extract Text Only (.txt)
+         </button>
       </form>
 
       <!-- Progress Bar -->
@@ -283,8 +295,71 @@
 
             if (data.phase === 'done') {
                progressBar.style.background = 'linear-gradient(90deg, #50C878, #2ecc71)';
+               if (typeof window.__extractRestoreBtn === 'function') {
+                  window.__extractRestoreBtn();
+               }
             }
          });
+
+         // Extract Text Only button: async fetch so the page stays interactive
+         // and socket 'progress' events can update the bar in real time.
+         const extractBtn = document.getElementById('extract-text-btn');
+         if (extractBtn) {
+            extractBtn.addEventListener('click', async function () {
+               const form = document.querySelector('form');
+               const files = document.getElementById('file-upload').files;
+               if (!files || files.length === 0) {
+                  alert('Vui lòng chọn ít nhất 1 ảnh!');
+                  return;
+               }
+               // Sync source-lang and ocr hidden inputs. The pickers are custom
+               // <div class="custom-select"> widgets whose current value lives in
+               // #<id> .selected — mirror updateHiddenInputs' getSelectedText().
+               const readSelect = (id) => {
+                  const el = document.querySelector('#' + id + ' .selected');
+                  return el ? (el.textContent || '').trim() : '';
+               };
+               const srcEl = document.getElementById('selected_source_lang');
+               if (srcEl) srcEl.value = readSelect('source_lang') || 'Japanese (Manga)';
+               const ocrEl = document.getElementById('selected_ocr');
+               if (ocrEl) ocrEl.value = readSelect('ocr') || 'Chrome-Lens';
+
+               progressContainer.style.display = 'block';
+               progressBar.style.width = '0%';
+               progressBar.style.background = 'linear-gradient(90deg, #5E1675, #8e44ad)';
+               progressPhase.textContent = '⏳ Đang gửi ảnh...';
+               progressText.textContent = `${files.length} ảnh`;
+               extractBtn.disabled = true;
+               extractBtn.textContent = '⏳ Đang trích xuất...';
+
+               const restore = () => {
+                  extractBtn.disabled = false;
+                  extractBtn.textContent = '📝 Extract Text Only (.txt)';
+               };
+               window.__extractRestoreBtn = restore;
+
+               try {
+                  const fd = new FormData(form);
+                  const res = await fetch('/extract-text', { method: 'POST', body: fd });
+                  if (!res.ok) throw new Error('HTTP ' + res.status);
+                  const blob = await res.blob();
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'manga_texts.txt';
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  URL.revokeObjectURL(url);
+               } catch (err) {
+                  progressPhase.textContent = '❌ Lỗi';
+                  progressText.textContent = String(err);
+                  progressBar.style.background = 'linear-gradient(90deg, #c0392b, #e74c3c)';
+               } finally {
+                  restore();
+               }
+            });
+         }
 
          // Show progress when form submitted
          document.querySelector('form').addEventListener('submit', function () {
