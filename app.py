@@ -28,18 +28,8 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "secret_key")
 
 # Initialize SocketIO with auto-detected async mode
 def get_async_mode():
-    if getattr(sys, 'frozen', False):
-        return 'threading'
-    try:
-        import eventlet
-        return 'eventlet'
-    except ImportError:
-        pass
-    try:
-        import gevent
-        return 'gevent'
-    except ImportError:
-        pass
+    # Force threading mode: eventlet monkey-patches selectors, which breaks
+    # asyncio (used by chrome-lens OCR) on Python 3.9.
     return 'threading'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=get_async_mode())
@@ -780,6 +770,298 @@ def upload_file():
     return render_template("translate.html", images=processed_images)
 
 
+def _sort_bubbles_manga_order(bubbles):
+    """Sort bubbles in Japanese manga reading order: top-to-bottom rows,
+    right-to-left within each row. Each bubble dict must have x1,y1,x2,y2.
+    """
+    if not bubbles:
+        return []
+    heights = [max(0.0, b['y2'] - b['y1']) for b in bubbles]
+    avg_h = sum(heights) / len(heights) if heights else 0.0
+    row_thresh = max(avg_h * 0.6, 1e-9)
+
+    items = sorted(bubbles, key=lambda b: (b['y1'] + b['y2']) / 2)
+    rows = []
+    for b in items:
+        yc = (b['y1'] + b['y2']) / 2
+        if rows and abs(yc - rows[-1]['yc_mean']) <= row_thresh:
+            row = rows[-1]
+            row['items'].append(b)
+            row['yc_mean'] = sum(((it['y1'] + it['y2']) / 2) for it in row['items']) / len(row['items'])
+        else:
+            rows.append({'yc_mean': yc, 'items': [b]})
+
+    ordered = []
+    for row in rows:
+        row['items'].sort(key=lambda b: -((b['x1'] + b['x2']) / 2))
+        ordered.extend(row['items'])
+    return ordered
+
+
+@app.route("/extract-text", methods=["POST"])
+def extract_text():
+    """OCR-only endpoint. Runs bubble detection + OCR on uploaded images and
+    returns a single .txt file with texts grouped per page in Japanese manga
+    reading order (right-to-left, top-to-bottom).
+    """
+    selected_ocr = request.form.get("selected_ocr", "chrome-lens").lower()
+    enable_black_bubble = request.form.get("detect_black_bubbles") == "on"
+    filter_sfx = request.form.get("filter_sfx", "on") == "on"
+    gemini_api_key = request.form.get("gemini_api_key", "").strip()
+
+    source_lang_map = {
+        "japanese (manga)": "ja",
+        "chinese (manhua)": "zh",
+        "korean (manhwa)": "ko",
+        "english (comic)": "en",
+    }
+    selected_source = request.form.get("selected_source_lang", "Japanese (Manga)").lower()
+    source_lang = source_lang_map.get(selected_source, "ja")
+
+    files = request.files.getlist("files")
+    if not files or files[0].filename == '':
+        return redirect("/")
+
+    if selected_ocr == "chrome-lens":
+        if _OCR_CACHE["chrome_lens"] is None:
+            import asyncio as _asyncio
+            try:
+                _asyncio.get_event_loop()
+            except RuntimeError:
+                _asyncio.set_event_loop(_asyncio.new_event_loop())
+            _OCR_CACHE["chrome_lens"] = ChromeLensOCR(ocr_language=source_lang)
+        mocr = _OCR_CACHE["chrome_lens"]
+        mocr.ocr_language = source_lang
+    else:
+        if _OCR_CACHE["manga_ocr"] is None:
+            _OCR_CACHE["manga_ocr"] = MangaOcr()
+        mocr = _OCR_CACHE["manga_ocr"]
+
+    use_batch_ocr = hasattr(mocr, 'process_batch')
+    use_full_page_ocr = selected_ocr == "chrome-lens"
+
+    def _flatten(t):
+        return " ".join((t or "").split())
+
+    def _char_in_lang(ch, lang):
+        cp = ord(ch)
+        if lang == "ja":
+            # Hiragana + Katakana + CJK unified + half-width kana
+            return (0x3040 <= cp <= 0x30FF) or (0x4E00 <= cp <= 0x9FFF) or (0xFF66 <= cp <= 0xFF9F)
+        if lang == "zh":
+            return (0x4E00 <= cp <= 0x9FFF) or (0x3400 <= cp <= 0x4DBF) or (0xF900 <= cp <= 0xFAFF)
+        if lang == "ko":
+            return (0xAC00 <= cp <= 0xD7AF) or (0x1100 <= cp <= 0x11FF) or (0x3130 <= cp <= 0x318F)
+        if lang == "en":
+            return ('A' <= ch <= 'Z') or ('a' <= ch <= 'z')
+        return True
+
+    def _keep_for_lang(text, lang):
+        letters = [c for c in text if not c.isspace() and not c.isdigit() and not c in "、。，．・「」『』()（）!?！？…—-—:：;；\"'　"]
+        if not letters:
+            # Only punctuation/numbers/spaces — skip
+            return False
+        matched = sum(1 for c in letters if _char_in_lang(c, lang))
+        # Keep if at least 40% of letter characters belong to target script
+        return matched / len(letters) >= 0.4
+
+    # Common English/Vietnamese-manga SFX and animal-sound words. Purely
+    # heuristic — used only when the filter checkbox is on.
+    _SFX_WORDS = {
+        "ARF", "BARK", "WOOF", "GRR", "GRRR", "GROWL", "MEOW", "MOO", "OINK",
+        "QUACK", "NEIGH", "BAA", "TWEET", "CHIRP", "HISS", "ROAR", "SQUEAK",
+        "RUSTLE", "THUD", "THUMP", "BANG", "BOOM", "CRASH", "SLAM", "CLANG",
+        "CLINK", "CLICK", "CLACK", "CRACK", "SNAP", "POP", "PUFF", "WHOOSH",
+        "SWOOSH", "SWISH", "SPLASH", "SPLAT", "SLURP", "GULP", "GASP", "PANT",
+        "SIGH", "GRUNT", "SNIFF", "SNORT", "SOB", "GIGGLE", "CHUCKLE", "HAHA",
+        "HEHE", "AHAHA", "WHAM", "ZAP", "POW", "BAM", "TICK", "TOCK", "DING",
+        "DONG", "BEEP", "HONK", "BUZZ", "SHH", "SHHH", "SHUSH", "PSST",
+        "TAP", "PATTER", "STOMP", "CREAK", "CRUNCH", "WHIRR", "HUM", "RING",
+        "RUMBLE", "ROAR", "GRIND", "SIZZLE", "FIZZ", "CRACKLE", "STOMP",
+        "STEP", "DRIP", "SPLIT", "TCH", "TSK", "HMPH", "HMMPH", "HUFF",
+        "HAAH", "AAH", "AAAH", "AAAAH", "OOF", "OW", "OWW", "OUCH", "ERR",
+        "UM", "UMM", "UH", "UHH", "HUH", "GAK", "GHK", "GLK", "GAH", "AGH",
+        "YEE", "YEEE", "WOW", "WOOW", "WHOA", "GASP", "PANT",
+        # Japanese SFX romanised
+        "GOSHI", "GORO", "KOTSU", "DOKI", "DOKUN", "BAKUN", "GATA", "GATAN",
+        "MOGU", "MOGE", "GORI", "GARI", "GYU", "BATA", "GUNI", "GUSHA",
+        "PIKA", "PACHI", "PYU", "SUU", "FUU", "HYUUU",
+    }
+
+    def _looks_like_sfx(text):
+        if not text:
+            return True
+        # Strip surrounding punctuation, keep letters + digits + inner spaces
+        cleaned = "".join(c if (c.isalnum() or c.isspace()) else " " for c in text)
+        tokens = [t for t in cleaned.split() if t]
+        if not tokens:
+            return True
+        upper_tokens = [t.upper() for t in tokens]
+        # Rule 1: single- or multi-token blocks where every token is repeated
+        # the same SFX-looking word (ARF! ARF!, RUSTLE RUSTLE)
+        if len(set(upper_tokens)) == 1 and upper_tokens[0] in _SFX_WORDS:
+            return True
+        # Rule 2: every token is in the SFX list
+        if all(t in _SFX_WORDS for t in upper_tokens):
+            return True
+        # Rule 3: single short token, uppercase-only in source, no vowels
+        if len(tokens) == 1:
+            tok = tokens[0]
+            if tok.isupper() and len(tok) <= 5 and not any(v in tok for v in "AEIOU"):
+                return True
+        # Rule 4: repeated-syllable garbage: "モ" "ゲ" "ク" — single-char CJK tokens
+        if all(len(t) == 1 and not t.isascii() for t in tokens):
+            return True
+        return False
+
+    def _gemini_filter_sfx(pages_in, api_key):
+        """Ask Gemini to keep only meaningful dialogue lines. Returns pages
+        with a filtered `texts` list. Falls back to input on any error.
+        """
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-2.5-flash-lite")
+            # Build a compact payload
+            payload_lines = []
+            for i, p in enumerate(pages_in, start=1):
+                payload_lines.append(f"### page {i}")
+                for j, t in enumerate(p['texts'], start=1):
+                    payload_lines.append(f"{j}. {t}")
+            payload = "\n".join(payload_lines)
+            prompt = (
+                "You are cleaning OCR output from a manga/comic. Below is a list of "
+                "text blocks grouped per page. Remove entries that are onomatopoeia, "
+                "sound effects (SFX), animal noises, or non-verbal grunts. Keep only "
+                "meaningful dialogue/narration/thought. Preserve original text; do NOT "
+                "translate or paraphrase. Return the result as JSON with this exact "
+                "shape: {\"pages\":[{\"page\":1,\"texts\":[\"...\",\"...\"]}, ...]}. "
+                "Include every page number even if its texts array is empty.\n\n"
+                f"{payload}"
+            )
+            resp = model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"},
+            )
+            data = json.loads(resp.text)
+            by_page = {int(x['page']): [t for t in x.get('texts', []) if t] for x in data.get('pages', [])}
+            out = []
+            for i, p in enumerate(pages_in, start=1):
+                out.append({'name': p['name'], 'texts': by_page.get(i, p['texts'])})
+            return out
+        except Exception as e:
+            print(f"Gemini SFX filter failed, using heuristic-only output: {e}")
+            return pages_in
+
+    pages = []
+    for idx, file in enumerate(files, start=1):
+        if not file or not file.filename:
+            continue
+        try:
+            file_bytes = np.frombuffer(file.stream.read(), dtype=np.uint8)
+            image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            if image is None:
+                continue
+        except Exception as e:
+            print(f"Error reading {file.filename}: {e}")
+            continue
+
+        name = os.path.splitext(file.filename)[0]
+        socketio.emit('progress', {
+            'phase': 'ocr', 'current': idx, 'total': len(files),
+            'percent': int((idx - 1) / max(len(files), 1) * 100),
+            'message': f'OCR page {idx}/{len(files)}: {name}'
+        })
+
+        page_texts = []
+        if use_full_page_ocr:
+            try:
+                pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                blocks = mocr.get_text_blocks(pil_img)
+                items = []
+                for blk in blocks:
+                    txt = _flatten(blk.get('text', ''))
+                    if not txt or not _keep_for_lang(txt, source_lang):
+                        continue
+                    g = blk.get('geometry', {}) or {}
+                    cx = g.get('center_x', 0.0)
+                    cy = g.get('center_y', 0.0)
+                    w = g.get('width', 0.0)
+                    h = g.get('height', 0.0)
+                    items.append({
+                        'text': txt,
+                        'x1': cx - w / 2, 'x2': cx + w / 2,
+                        'y1': cy - h / 2, 'y2': cy + h / 2,
+                    })
+                ordered = _sort_bubbles_manga_order(items)
+                page_texts = [it['text'] for it in ordered]
+            except Exception as e:
+                print(f"Chrome Lens full-page OCR failed for {name}: {e}")
+                page_texts = []
+        else:
+            results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
+            bubbles = []
+            for r in results:
+                x1, y1, x2, y2 = int(r[0]), int(r[1]), int(r[2]), int(r[3])
+                crop = image[y1:y2, x1:x2]
+                bubbles.append({
+                    'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+                    'img': Image.fromarray(crop),
+                })
+            ordered = _sort_bubbles_manga_order(bubbles)
+            if ordered:
+                imgs = [b['img'] for b in ordered]
+                if use_batch_ocr:
+                    try:
+                        raw = mocr.process_batch(imgs)
+                    except Exception as e:
+                        print(f"Batch OCR failed, falling back: {e}")
+                        raw = [mocr(im) for im in imgs]
+                else:
+                    raw = [mocr(im) for im in imgs]
+                page_texts = [_flatten(t) for t in raw]
+
+        page_texts = [t for t in page_texts if t and _keep_for_lang(t, source_lang)]
+        if filter_sfx:
+            page_texts = [t for t in page_texts if not _looks_like_sfx(t)]
+        pages.append({'name': name, 'texts': page_texts})
+
+    # Optional second-pass LLM filter when a Gemini key is provided
+    if filter_sfx and gemini_api_key:
+        socketio.emit('progress', {
+            'phase': 'ocr', 'current': len(files), 'total': len(files),
+            'percent': 99, 'message': 'Gemini filter: dropping SFX/noise...'
+        })
+        pages = _gemini_filter_sfx(pages, gemini_api_key)
+
+    socketio.emit('progress', {
+        'phase': 'done', 'current': len(files), 'total': len(files),
+        'percent': 100, 'message': 'Text extraction complete'
+    })
+
+    lines = []
+    for i, page in enumerate(pages, start=1):
+        label = f"page {i}"
+        if page['name']:
+            label += f" ({page['name']})"
+        lines.append(f"{label}:")
+        lines.append("")
+        if not page['texts']:
+            lines.append("* (no text detected)")
+        else:
+            for t in page['texts']:
+                lines.append(f"* {t}" if t else "* (empty)")
+        lines.append("")
+
+    buf = io.BytesIO(("\n".join(lines)).encode("utf-8"))
+    return send_file(
+        buf,
+        mimetype='text/plain; charset=utf-8',
+        as_attachment=True,
+        download_name='manga_texts.txt',
+    )
+
+
 @app.route("/download-zip", methods=["POST"])
 def download_zip():
     """Create and download a ZIP file containing all translated images."""
@@ -819,4 +1101,4 @@ def download_zip():
 
 
 if __name__ == "__main__":
-    socketio.run(app, debug=True)
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
