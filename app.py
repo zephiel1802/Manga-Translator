@@ -1,4 +1,14 @@
 from flask import Flask, render_template, request, redirect, send_file, jsonify
+import builtins
+import datetime
+
+# Override print to include timestamps
+original_print = builtins.print
+def timestamped_print(*args, **kwargs):
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    original_print(f"[{timestamp}]", *args, **kwargs)
+builtins.print = timestamped_print
+
 from flask_socketio import SocketIO, emit
 import io
 import zipfile
@@ -13,6 +23,16 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 from detect_bubbles import detect_bubbles
 from process_bubble import process_bubble, process_bubble_auto, is_dark_bubble, get_bubble_background_color, get_dominant_color, process_bubble_preserve_gradient
 from translator.translator import MangaTranslator
+
+# PanelCleanerZ integration for text detection + cleaning
+try:
+    from pcleaner_bridge import get_pcleaner_bridge
+    _pcleaner = get_pcleaner_bridge()
+    PCLEANER_AVAILABLE = True
+    print("PanelCleanerZ bridge loaded (Comic Text Detector + LaMa inpainting)")
+except Exception as e:
+    PCLEANER_AVAILABLE = False
+    print(f"PanelCleanerZ not available, using fallback: {e}")
 from translator.context_memory import ContextMemory
 from add_text import add_text
 from manga_ocr import MangaOcr
@@ -114,45 +134,127 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     Optimized with batch translation for Gemini to reduce API calls.
     Supports auto font matching when font_analyzer is provided and selected_font is 'auto'.
     """
-    results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
+    yolo_results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
     
-    if not results:
-        return image
-    
-    # Phase 1: Collect all bubble data and OCR texts
     bubble_data = []
     texts_to_translate = []
     first_bubble_image = None  # For font analysis
     
-    for result in results:
-        # Handle both old format (6 items) and new format (7 items with is_dark_bubble)
-        if len(result) >= 7:
-            x1, y1, x2, y2, score, class_id, is_dark = result[:7]
-        else:
-            x1, y1, x2, y2, score, class_id = result[:6]
-            is_dark = 0
+    # Parse YOLO boxes
+    yolo_boxes = []
+    if yolo_results:
+        for result in yolo_results:
+            if len(result) >= 7:
+                x1, y1, x2, y2, score, class_id, is_dark = result[:7]
+            else:
+                x1, y1, x2, y2, score, class_id = result[:6]
+                is_dark = 0
+            yolo_boxes.append({"coords": (int(x1), int(y1), int(x2), int(y2)), "is_dark": is_dark})
+
+    # Hybrid Logic for Chrome-Lens
+    from ocr.chrome_lens_ocr import ChromeLensOCR
+    if isinstance(mocr, ChromeLensOCR):
+        print("Using Hybrid Detection: YOLO + Chrome Lens blocks")
+        lens_blocks = mocr.detect_and_recognize_blocks(image)
         
-        detected_image = image[int(y1):int(y2), int(x1):int(x2)]
+        # Match Lens Blocks to YOLO Boxes
+        for box in yolo_boxes:
+            bx1, by1, bx2, by2 = box["coords"]
+            box_texts = []
+            
+            # Find intersecting Lens blocks
+            for block in list(lens_blocks):
+                lx1, ly1, lx2, ly2 = block["coords"]
+                
+                # Intersection checking
+                ix1 = max(bx1, lx1)
+                iy1 = max(by1, ly1)
+                ix2 = min(bx2, lx2)
+                iy2 = min(by2, ly2)
+                
+                if ix1 < ix2 and iy1 < iy2:
+                    box_texts.append(block["text"])
+                    lens_blocks.remove(block) # Remove so it's not processed again
+            
+            if box_texts:
+                box["text"] = " ".join(box_texts)
         
-        # Save first bubble for font analysis (before processing)
+        # Any remaining lens_blocks are "outside bubbles"
+        for block in lens_blocks:
+            yolo_boxes.append({
+                "coords": block["coords"],
+                "is_dark": 0,
+                "text": block["text"],
+                "is_outside": True
+            })
+
+    if not yolo_boxes:
+        return image
+        
+    for box in yolo_boxes:
+        x1, y1, x2, y2 = box["coords"]
+        is_dark = box["is_dark"]
+        is_outside = box.get("is_outside", False)
+        
+        # Ensure coordinates are within image bounds
+        h, w = image.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        
+        if x2 <= x1 or y2 <= y1:
+            continue
+            
+        detected_image = image[y1:y2, x1:x2]
+        
         if first_bubble_image is None:
             first_bubble_image = detected_image.copy()
-        
-        # Fix: detected_image is already uint8, no need to multiply by 255
-        im = Image.fromarray(detected_image)
-        text = mocr(im)
-        
-        # Use auto detection or forced dark based on detection flag
-        detected_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
-        
+            
+        if "text" in box:
+            text = box["text"]
+        else:
+            im = Image.fromarray(detected_image)
+            text = mocr(im)
+            
+        if not text or not text.strip():
+            continue
+            
+        if is_outside:
+            if LAMA_AVAILABLE:
+                # Use LaMa neural inpainting for outside text
+                lama = get_lama_inpainter()
+                # Create text mask from the detected region using Otsu threshold
+                gray_region = cv2.cvtColor(detected_image, cv2.COLOR_BGR2GRAY)
+                _, text_mask = cv2.threshold(gray_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                # Dilate mask slightly to cover text edges
+                dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                text_mask = cv2.dilate(text_mask, dilate_kernel, iterations=2)
+                processed_image = lama.inpaint(detected_image, text_mask)
+            else:
+                # Fallback to GaussianBlur
+                processed_image = cv2.GaussianBlur(detected_image, (15, 15), 0)
+            cont = np.array([[[0, 0]], [[0, y2-y1]], [[x2-x1, y2-y1]], [[x2-x1, 0]]], dtype=np.int32)
+            bubble_is_dark = False
+            detected_color = (255, 255, 255)
+            requires_stroke = True
+        else:
+            if SMART_MASKER_AVAILABLE:
+                detected_image, cont, bubble_is_dark, detected_color = _smart_masker.clean_bubble(detected_image, force_dark=(is_dark == 1))
+            else:
+                detected_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+            requires_stroke = False
+            
         bubble_data.append({
             'detected_image': detected_image,
             'contour': cont,
-            'coords': (int(x1), int(y1), int(x2), int(y2)),
+            'coords': (x1, y1, x2, y2),
             'is_dark': bubble_is_dark,
-            'fill_color': detected_color
+            'fill_color': detected_color,
+            'requires_stroke': requires_stroke
         })
         texts_to_translate.append(text)
+    
+    if not bubble_data:
+        return image
     
     # Phase 2: Batch translate
     if selected_translator == "gemini" and len(texts_to_translate) > 1:
@@ -199,6 +301,34 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
                 target=manga_translator.target
             )
         except Exception as e:
+            print(f"Batch translation failed, falling back to single: {e}")
+            translated_texts = [manga_translator.translate(t, method=selected_translator) for t in texts_to_translate]
+
+    elif selected_translator == "freellm" and len(texts_to_translate) > 1:
+        # Use batch translation for FreeLLM
+        try:
+            if not hasattr(manga_translator, '_freellm_translator') or manga_translator._freellm_translator is None:
+                from translator.freellm_translator import FreeLLMTranslator
+                api_key = getattr(manga_translator, '_freellm_api_key', None)
+                base_url = getattr(manga_translator, '_freellm_base_url', None)
+                if not api_key:
+                    raise ValueError("FreeLLM API key not provided")
+                custom_prompt = getattr(manga_translator, '_freellm_custom_prompt', None)
+                manga_translator._freellm_translator = FreeLLMTranslator(
+                    api_key=api_key, 
+                    base_url=base_url,
+                    custom_prompt=custom_prompt
+                )
+            
+            translated_texts = manga_translator._freellm_translator.translate_batch(
+                texts_to_translate,
+                source=manga_translator.source,
+                target=manga_translator.target
+            )
+        except Exception as e:
+            print(f"Batch translation failed, falling back to single: {e}")
+            translated_texts = [manga_translator.translate(t, method=selected_translator) for t in texts_to_translate]
+        except Exception as e:
             print(f"Copilot batch translation failed: {e}")
             translated_texts = texts_to_translate  # Return original on error
     
@@ -213,7 +343,16 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     for data, translated_text in zip(bubble_data, translated_texts):
         # Use white text for dark bubbles, black text for light bubbles
         text_color = (255, 255, 255) if data.get('is_dark', False) else (0, 0, 0)
-        add_text(data['detected_image'], translated_text, font_path, data['contour'], text_color)
+        add_text(
+            image=data['detected_image'], 
+            text=translated_text, 
+            font_path=font_path, 
+            bubble_contour=data['contour'], 
+            text_color=text_color,
+            is_dark_bubble=data.get('is_dark', False),
+            detected_color=data.get('fill_color'),
+            requires_stroke=data.get('requires_stroke', False)
+        )
     
     return image
 
@@ -240,7 +379,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         manga_translator: MangaTranslator instance with translator
         mocr: OCR engine
         selected_font: Font to use
-        translator_type: 'copilot' or 'gemini'
+        translator_type: 'copilot' or 'gemini' or 'freellm'
         batch_size: Number of pages per API call
         use_context_memory: Whether to include context from all pages for better translation
         
@@ -285,47 +424,163 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         emit_progress('detection', idx + 1, total_images, f'Phát hiện bubbles: {name}')
         print(f"  [{idx+1}/{total_images}] {name}", end="", flush=True)
         
-        results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
-        if not results:
-            all_pages_data[name] = {'image': image, 'bubbles': [], 'texts': []}
-            print(f" - 0 bubbles")
-            continue
-        
-        print(f" - {len(results)} bubbles")
-        
         bubble_data = []
+        page_texts = []
         
-        for bubble_idx, result in enumerate(results):
-            # Handle both old format (6 items) and new format (7 items with is_dark_bubble)
-            if len(result) >= 7:
-                x1, y1, x2, y2, score, class_id, is_dark = result[:7]
-            else:
-                x1, y1, x2, y2, score, class_id = result[:6]
-                is_dark = 0
+        if PCLEANER_AVAILABLE:
+            # === PanelCleanerZ Pipeline ===
+            # Step 1: Detect text blocks + generate pixel-level mask + clean image
+            result = _pcleaner.detect_and_clean(image)
+            cleaned_image = result['cleaned_image']
+            ctd_blocks = result['text_blocks']
+            mask_refined = result['mask_refined']
             
-            detected_image = image[int(y1):int(y2), int(x1):int(x2)]
+            print(f" - CTD found {len(ctd_blocks)} text blocks", end="", flush=True)
             
-            # IMPORTANT: Add to OCR queue BEFORE processing (which fills white/black)
-            all_bubble_images.append(Image.fromarray(detected_image.copy()))
-            bubble_mapping.append((name, bubble_idx))
+            # Step 2: For each text block, OCR from original image
+            for blk in ctd_blocks:
+                x1, y1, x2, y2 = blk['coords']
+                h, w = image.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                
+                detected_region = image[y1:y2, x1:x2]
+                cleaned_region = cleaned_image[y1:y2, x1:x2]
+                
+                # OCR on the original (uncleaned) image region
+                im = Image.fromarray(detected_region)
+                all_bubble_images.append(im)
+                bubble_mapping.append((name, len(page_texts)))
+                page_texts.append(None)  # Placeholder
+                
+                # Determine if dark bubble from CTD colors
+                bg_r, bg_g, bg_b = blk['bg_color']
+                avg_bg = (bg_r + bg_g + bg_b) / 3
+                bubble_is_dark = avg_bg < 128
+                
+                # Use the cleaned region directly
+                detected_color = (int(bg_b), int(bg_g), int(bg_r))  # RGB -> BGR
+                cont = np.array([[[0, 0]], [[0, y2-y1]], [[x2-x1, y2-y1]], [[x2-x1, 0]]], dtype=np.int32)
+                
+                # Check if outside bubble (complex background)
+                _, is_uniform = _pcleaner._analyze_block_background(
+                    image[y1:y2, x1:x2],
+                    mask_refined[y1:y2, x1:x2] if mask_refined is not None else np.zeros((y2-y1, x2-x1), dtype=np.uint8)
+                )
+                requires_stroke = not is_uniform
+                
+                bubble_data.append({
+                    'detected_image': cleaned_region.copy(),
+                    'contour': cont,
+                    'coords': (x1, y1, x2, y2),
+                    'is_dark': bubble_is_dark,
+                    'fill_color': detected_color,
+                    'requires_stroke': requires_stroke
+                })
             
-            # Process bubble (fill with auto-detected or specified color based on type)
-            processed_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+            print(f" ✓")
+        else:
+            # === Fallback: Original YOLO Pipeline ===
+            yolo_results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
+            yolo_boxes = []
+            if yolo_results:
+                for result in yolo_results:
+                    if len(result) >= 7:
+                        x1, y1, x2, y2, score, class_id, is_dark = result[:7]
+                    else:
+                        x1, y1, x2, y2, score, class_id = result[:6]
+                        is_dark = 0
+                    yolo_boxes.append({"coords": (int(x1), int(y1), int(x2), int(y2)), "is_dark": is_dark})
+                    
+            # Hybrid Logic for Chrome-Lens
+            from ocr.chrome_lens_ocr import ChromeLensOCR
+            if isinstance(mocr, ChromeLensOCR):
+                lens_blocks = mocr.detect_and_recognize_blocks(image)
+                for box in yolo_boxes:
+                    bx1, by1, bx2, by2 = box["coords"]
+                    box_texts = []
+                    for block in list(lens_blocks):
+                        lx1, ly1, lx2, ly2 = block["coords"]
+                        ix1 = max(bx1, lx1)
+                        iy1 = max(by1, ly1)
+                        ix2 = min(bx2, lx2)
+                        iy2 = min(by2, ly2)
+                        if ix1 < ix2 and iy1 < iy2:
+                            box_texts.append(block["text"])
+                            lens_blocks.remove(block)
+                    if box_texts:
+                        box["text"] = " ".join(box_texts)
+                for block in lens_blocks:
+                    yolo_boxes.append({
+                        "coords": block["coords"],
+                        "is_dark": 0,
+                        "text": block["text"],
+                        "is_outside": True
+                    })
+
+            if not yolo_boxes:
+                all_pages_data[name] = {'image': image, 'bubbles': [], 'texts': []}
+                print(f" - 0 bubbles")
+                continue
             
-            bubble_data.append({
-                'detected_image': processed_image,
-                'contour': cont,
-                'coords': (int(x1), int(y1), int(x2), int(y2)),
-                'is_dark': bubble_is_dark,
-                'fill_color': detected_color
-            })
+            print(f" - {len(yolo_boxes)} bubbles")
+            
+            for bubble_idx, box in enumerate(yolo_boxes):
+                x1, y1, x2, y2 = box["coords"]
+                is_dark = box["is_dark"]
+                is_outside = box.get("is_outside", False)
+                h, w = image.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                detected_image = image[y1:y2, x1:x2]
+                
+                if "text" in box:
+                    text = box["text"]
+                    if not text or not text.strip():
+                        continue
+                    page_texts.append(text)
+                    if is_outside:
+                        processed_image = cv2.GaussianBlur(detected_image, (15, 15), 0)
+                        cont = np.array([[[0, 0]], [[0, y2-y1]], [[x2-x1, y2-y1]], [[x2-x1, 0]]], dtype=np.int32)
+                        bubble_is_dark = False
+                        detected_color = (255, 255, 255)
+                        requires_stroke = True
+                    else:
+                        processed_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+                        requires_stroke = False
+                    bubble_data.append({
+                        'detected_image': processed_image,
+                        'contour': cont,
+                        'coords': (x1, y1, x2, y2),
+                        'is_dark': bubble_is_dark,
+                        'fill_color': detected_color,
+                        'requires_stroke': requires_stroke
+                    })
+                else:
+                    all_bubble_images.append(Image.fromarray(detected_image.copy()))
+                    bubble_mapping.append((name, len(page_texts)))
+                    page_texts.append(None)
+                    processed_image, cont, bubble_is_dark, detected_color = process_bubble_auto(detected_image, force_dark=(is_dark == 1))
+                    bubble_data.append({
+                        'detected_image': processed_image,
+                        'contour': cont,
+                        'coords': (x1, y1, x2, y2),
+                        'is_dark': bubble_is_dark,
+                        'fill_color': detected_color,
+                        'requires_stroke': False
+                    })
         
         all_pages_data[name] = {
             'image': image,
             'bubbles': bubble_data,
-            'texts': []  # Will fill after OCR
+            'texts': page_texts
         }
-    
+
     detection_time = time.time() - start_time
     print(f"✓ Bubble detection completed in {detection_time:.1f}s ({len(all_bubble_images)} total bubbles)")
     emit_progress('detection', total_images, total_images, f'Phát hiện xong {len(all_bubble_images)} bubbles')
@@ -343,9 +598,13 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             # Sequential OCR (MangaOcr or others)
             all_texts = [mocr(img) for img in all_bubble_images]
         
-        # Map texts back to pages
-        for (page_name, bubble_idx), text in zip(bubble_mapping, all_texts):
-            all_pages_data[page_name]['texts'].append(text)
+        # Now map the texts back to the bubbles preserving order
+        for (page_name, text_idx), text in zip(bubble_mapping, all_texts):
+            all_pages_data[page_name]['texts'][text_idx] = text
+            
+        # Clean up any None values (if any OCR failed) to preserve length matching bubbles
+        for page_name in all_pages_data:
+            all_pages_data[page_name]['texts'] = [t if t is not None else "" for t in all_pages_data[page_name]['texts']]
         
         ocr_time = time.time() - ocr_start
         print(f"({ocr_time:.1f}s)")
@@ -365,6 +624,9 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         elif translator_type == "gemini" and hasattr(manga_translator, '_gemini_translator') and manga_translator._gemini_translator:
             translator = manga_translator._gemini_translator
             translator_name = "Gemini"
+        elif translator_type == "freellm" and hasattr(manga_translator, '_freellm_translator') and manga_translator._freellm_translator:
+            translator = manga_translator._freellm_translator
+            translator_name = "FreeLLM"
         else:
             translator = None
             translator_name = "Unknown"
@@ -441,7 +703,16 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             # Use white text for dark bubbles, black text for light bubbles
             text_color = (255, 255, 255) if bubble.get('is_dark', False) else (0, 0, 0)
             # Add translated text
-            add_text(bubble_region, text, font_path, bubble['contour'], text_color)
+            add_text(
+                image=bubble_region, 
+                text=text, 
+                font_path=font_path, 
+                bubble_contour=bubble['contour'], 
+                text_color=text_color,
+                is_dark_bubble=bubble.get('is_dark', False),
+                detected_color=bubble.get('fill_color'),
+                requires_stroke=bubble.get('requires_stroke', False)
+            )
         
         processed_results.append({
             'image': image,
@@ -468,7 +739,8 @@ def upload_file():
         "Opus-mt model": "hf",
         "NLLB": "nllb",
         "Gemini": "gemini",
-        "Local LLM": "copilot"  # copilot is internal name for OpenAI-compatible endpoints
+        "FreeLLM": "freellm",
+        "Local LLM": "copilot"
     }
     selected_translator = translator_map.get(
         request.form["selected_translator"],
@@ -479,8 +751,10 @@ def upload_file():
     copilot_server = request.form.get("copilot_server", "http://localhost:8080")
     copilot_model = request.form.get("copilot_model_input", "gpt-4o")
     
-    # Get Gemini API key from form
+    # Get Gemini/FreeLLM API keys
     gemini_api_key = request.form.get("gemini_api_key", "").strip()
+    freellm_api_key = request.form.get("freellm_api_key", "").strip()
+    freellm_base_url = request.form.get("freellm_base_url", "http://127.0.0.1:31415/v1").strip()
     
     # Get context memory setting (checkbox - "on" if checked, None if not)
     use_context_memory = request.form.get("context_memory") == "on"
@@ -572,7 +846,14 @@ def upload_file():
     # Set Gemini API key
     if selected_translator == "gemini" and gemini_api_key:
         manga_translator._gemini_api_key = gemini_api_key
-        print(f"Using Gemini API with provided key")
+
+    if selected_translator == "freellm" and style:
+        manga_translator._freellm_custom_prompt = style
+    
+    if selected_translator == "freellm" and freellm_api_key:
+        manga_translator._freellm_api_key = freellm_api_key
+        manga_translator._freellm_base_url = freellm_base_url
+        print(f"Using FreeLLM API with provided key")
     
     # Set Copilot settings
     if selected_translator == "copilot":
@@ -602,7 +883,7 @@ def upload_file():
             print("Font analyzer initialized for auto font matching")
         except Exception as e:
             print(f"Failed to initialize font analyzer: {e}")
-            selected_font = "animeace_"  # Fallback to default
+            selected_font = "mangat"  # Fallback to default
     
     # Process all images
     processed_images = []
@@ -635,15 +916,15 @@ def upload_file():
             try:
                 results = detect_bubbles(MODEL_PATH, all_images[0]['image'], enable_black_bubble)
                 if results:
-                    x1, y1, x2, y2, _, _ = results[0]
+                    x1, y1, x2, y2 = results[0][:4]
                     first_bubble = all_images[0]['image'][int(y1):int(y2), int(x1):int(x2)]
                     selected_font = font_analyzer.analyze_and_match(first_bubble)
                     print(f"Auto font matched: {selected_font}")
                 else:
-                    selected_font = "animeace_"
+                    selected_font = "mangat"
             except Exception as e:
                 print(f"Font analysis failed: {e}")
-                selected_font = "animeace_"
+                selected_font = "mangat"
         
         # Initialize translator based on type
         if selected_translator == "copilot":
@@ -670,6 +951,21 @@ def upload_file():
                     custom_prompt=custom_prompt
                 )
                 print("Gemini translator initialized for multi-page batching")
+        
+        elif selected_translator == "freellm":
+            if not hasattr(manga_translator, '_freellm_translator') or manga_translator._freellm_translator is None:
+                from translator.freellm_translator import FreeLLMTranslator
+                api_key = freellm_api_key
+                base_url = freellm_base_url
+                if not api_key:
+                    api_key = os.environ.get("FREELLM_API_KEY")
+                custom_prompt = getattr(manga_translator, '_freellm_custom_prompt', None)
+                manga_translator._freellm_translator = FreeLLMTranslator(
+                    api_key=api_key, 
+                    base_url=base_url,
+                    custom_prompt=custom_prompt
+                )
+                print("FreeLLM translator initialized for multi-page batching")
         
         # Process with multi-page batching (10 pages per API call)
         processed_results = process_images_with_batch(
@@ -727,15 +1023,15 @@ def upload_file():
                         try:
                             results = detect_bubbles(MODEL_PATH, image, enable_black_bubble)
                             if results:
-                                x1, y1, x2, y2, _, _ = results[0]
+                                x1, y1, x2, y2 = results[0][:4]
                                 first_bubble = image[int(y1):int(y2), int(x1):int(x2)]
                                 selected_font = font_analyzer.analyze_and_match(first_bubble)
                                 print(f"Auto font matched (once for all images): {selected_font}")
                             else:
-                                selected_font = "animeace_"
+                                selected_font = "mangat"
                         except Exception as e:
                             print(f"Font analysis failed: {e}")
-                            selected_font = "animeace_"
+                            selected_font = "mangat"
                         auto_font_determined = True
                     
                     # Get original filename
@@ -819,4 +1115,17 @@ def download_zip():
 
 
 if __name__ == "__main__":
-    socketio.run(app, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    is_frozen = getattr(sys, 'frozen', False)
+    debug = not is_frozen and os.environ.get("FLASK_DEBUG", "0") == "1"
+
+    if is_frozen:
+        import threading
+        import webbrowser
+        def _open_browser():
+            import time
+            time.sleep(1.5)
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        threading.Thread(target=_open_browser, daemon=True).start()
+
+    socketio.run(app, host="127.0.0.1", port=port, debug=debug)

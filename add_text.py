@@ -149,7 +149,16 @@ def calculate_optimal_font_size(text, w, h, font_path):
 
 
 
-def add_text(image, text, font_path, bubble_contour, text_color=(0, 0, 0)):
+def add_text(
+    image,
+    text,
+    font_path,
+    bubble_contour,
+    text_color=(0, 0, 0),
+    is_dark_bubble=False,
+    detected_color=None,
+    requires_stroke=False
+):
     """
     Add text inside a speech bubble contour with dynamic font sizing.
 
@@ -192,7 +201,13 @@ def add_text(image, text, font_path, bubble_contour, text_color=(0, 0, 0)):
         # Horizontal centering
         text_x = x + (w - text_length) // 2
 
-        draw.text((text_x, text_y), line, font=font, fill=text_color)
+        if requires_stroke:
+            # Use white stroke for black text, and black stroke for white text
+            stroke_fill = "white" if text_color == (0, 0, 0) else "black"
+            draw.text((text_x, text_y), line, font=font, fill=text_color, stroke_width=3, stroke_fill=stroke_fill)
+        else:
+            draw.text((text_x, text_y), line, font=font, fill=text_color)
+            
         text_y += line_height
 
     image[:, :, :] = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)

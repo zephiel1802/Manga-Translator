@@ -123,6 +123,79 @@ class ChromeLensOCR:
         print(f"Chrome Lens OCR error: {last_error}")
         return ""
     
+    def detect_and_recognize_blocks(self, image) -> list:
+        """
+        Process an image and extract text blocks with bounding boxes.
+        Returns a list of dicts: [{'text': '...', 'coords': (x1, y1, x2, y2)}]
+        """
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+            
+        try:
+            loop = asyncio.get_running_loop()
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(self._process_blocks(image), loop)
+            return future.result(timeout=30)
+        except RuntimeError:
+            if not hasattr(self, '_loop') or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            return self._loop.run_until_complete(self._process_blocks(image))
+            
+    async def _process_blocks(self, image, max_retries: int = 5) -> list:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_concurrent)
+            
+        async with self._semaphore:
+            for attempt in range(max_retries):
+                try:
+                    if attempt == 0:
+                        await asyncio.sleep(random.uniform(0.1, 0.5))
+                        
+                    result = await self.api.process_image(
+                        image_path=image,
+                        ocr_language=self.ocr_language,
+                        output_format="blocks"
+                    )
+                    
+                    blocks = []
+                    img_width, img_height = image.size
+                    
+                    for block in result.get("text_blocks", []):
+                        text = block.get("text", "")
+                        geom = block.get("geometry", {})
+                        if text and geom:
+                            cx = geom.get("center_x", 0.5) * img_width
+                            cy = geom.get("center_y", 0.5) * img_height
+                            w = geom.get("width", 0) * img_width
+                            h = geom.get("height", 0) * img_height
+                            x1 = int(cx - w/2)
+                            y1 = int(cy - h/2)
+                            x2 = int(cx + w/2)
+                            y2 = int(cy + h/2)
+                            
+                            pad = 4
+                            x1 = max(0, x1 - pad)
+                            y1 = max(0, y1 - pad)
+                            x2 = min(img_width, x2 + pad)
+                            y2 = min(img_height, y2 + pad)
+                            
+                            blocks.append({
+                                "text": text,
+                                "coords": (x1, y1, x2, y2)
+                            })
+                    return blocks
+                except Exception as e:
+                    is_server_error = any(code in str(e) for code in ['502', '503', '504', '429'])
+                    if is_server_error and attempt < max_retries - 1:
+                        base_wait = 2 ** (attempt + 1)
+                        await asyncio.sleep(base_wait + random.uniform(0, base_wait))
+                    elif is_server_error:
+                        return []
+                    else:
+                        print(f"Chrome Lens OCR block error: {e}")
+                        return []
+        return []
+
     def process_batch(self, images: list) -> list:
         """
         Process multiple images concurrently for faster OCR.

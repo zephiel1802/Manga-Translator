@@ -70,6 +70,7 @@
                   </div>
                   <div class="options">
                      <span class="option">Gemini</span>
+                     <span class="option">FreeLLM</span>
                      <span class="option">Local LLM</span>
                      <span class="option">Google</span>
                      <span class="option">NLLB</span>
@@ -219,6 +220,23 @@
                <small style="color: #666; font-size: 12px; margin-top: 4px; display: block;">
                   🔒 Key được lưu trong trình duyệt của bạn (localStorage)
                </small>
+            </div>
+         </div>
+
+         <!-- FreeLLM Settings (show when FreeLLM selected) -->
+         <div id="freellm-settings" style="display: none; width: 100%;">
+            <div class="form-grid">
+               <div class="select-wrapper">
+                  <label class="translator-label">FreeLLM API Key</label>
+                  <input type="password" id="freellm_api_key" name="freellm_api_key"
+                     placeholder="freellmapi-..."
+                     style="width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px;">
+               </div>
+               <div class="select-wrapper">
+                  <label class="translator-label">Base URL</label>
+                  <input type="text" id="freellm_base_url" name="freellm_base_url" value="http://127.0.0.1:31415/v1"
+                     placeholder="http://127.0.0.1:31415/v1" class="text-input">
+               </div>
             </div>
          </div>
 

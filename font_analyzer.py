@@ -2,7 +2,7 @@
 Font Analyzer - Analyze manga font style and match with available fonts
 Uses Gemini Vision to directly select the best matching font from available options
 """
-import google.generativeai as genai
+from google import genai
 import json
 import os
 from PIL import Image
@@ -44,7 +44,7 @@ class FontAnalyzer:
         "Yuki-Tea And Oranges Regular": "Soft warm handwritten, gentle drama",
     }
     
-    DEFAULT_FONT = "animeace_"
+    DEFAULT_FONT = "mangat"
     
     def __init__(self, api_key: str = None):
         """Initialize with Gemini API key."""
@@ -52,8 +52,8 @@ class FontAnalyzer:
         if not self.api_key:
             raise ValueError("Gemini API key required. Set GEMINI_API_KEY or pass api_key.")
         
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        self.client = genai.Client(api_key=self.api_key)
+        self.model = "gemini-2.5-flash-lite"
     
     def _image_to_pil(self, image) -> Image.Image:
         """Convert various image formats to PIL Image."""
@@ -106,7 +106,10 @@ Return ONLY the font name (exactly as written above), nothing else.
 Example response: Yuki-Burobu"""
 
             print("[FontAnalyzer] Sending request to Gemini Vision...")
-            response = self.model.generate_content([prompt, pil_image])
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[prompt, pil_image]
+            )
             result = response.text.strip()
             
             print(f"[FontAnalyzer] Gemini raw response: '{result}'")

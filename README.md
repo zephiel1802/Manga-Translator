@@ -32,8 +32,11 @@ Dịch tự động speech bubbles trong manga/manhwa/manhua với AI!
 git clone https://github.com/pedguedes090/Manga-Translator.git
 cd Manga-Translator
 
-# Install
+# On Linux/Mac
 pip install -r requirements.txt
+
+# On Windows
+pip install -r requirements-windows.txt
 
 # Run
 python app.py
