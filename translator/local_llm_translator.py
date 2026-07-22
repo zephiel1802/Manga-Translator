@@ -70,6 +70,38 @@ class LocalLLMTranslator(BaseTranslator):
         self.model = model
         self.endpoint = f"{self.base_url}/v1/chat/completions"
     
+    def _translate_batch_internal(
+        self,
+        texts_to_translate: List[str],
+        source: str,
+        target: str,
+        custom_prompt: str = None
+    ) -> List[str]:
+        """Internal method to translate texts by chunking them."""
+        CHUNK_SIZE = 10
+        all_translations = []
+        
+        for i in range(0, len(texts_to_translate), CHUNK_SIZE):
+            chunk = texts_to_translate[i:i+CHUNK_SIZE]
+            chunk_translations = self._translate_chunk(chunk, source, target, custom_prompt)
+            all_translations.extend(chunk_translations)
+            
+        return all_translations
+
+    def _translate_chunk(
+        self,
+        texts_to_translate: List[str],
+        source: str,
+        target: str,
+        custom_prompt: str = None
+    ) -> List[str]:
+        """Translate a single chunk of texts."""
+        source_name = self.LANG_NAMES.get(source, "Japanese")
+        target_name = self.LANG_NAMES.get(target, "English")
+
+        
+        style_text = self._build_style_instructions()
+    
     def translate_single(self, text: str, source: str = "ja", target: str = "en") -> str:
         """Translate a single text string."""
         if not text or not text.strip():

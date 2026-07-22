@@ -21,21 +21,25 @@ class MangaTranslator:
         "ru": "rus_Cyrl",  # Russian
     }
     
-    def __init__(self, source="ja", target="en", gemini_api_key=None):
+    def __init__(self, source="ja", target="en", gemini_api_key=None, freellm_api_key=None, freellm_base_url=None):
         self.target = target
         self.source = source
         self.gemini_api_key = gemini_api_key
+        self.freellm_api_key = freellm_api_key
+        self.freellm_base_url = freellm_base_url
         self.translators = {
             "google": self._translate_with_google,
             "hf": self._translate_with_hf,
             "baidu": self._translate_with_baidu,
             "bing": self._translate_with_bing,
             "nllb": self._translate_with_nllb,
-            "gemini": self._translate_with_gemini
+            "gemini": self._translate_with_gemini,
+            "freellm": self._translate_with_freellm
         }
         # Lazy loading for heavy models
         # self._nllb_model and self._nllb_tokenizer are now cached in _model_cache
         self._gemini_translator = None
+        self._freellm_translator = None
 
     # Class-level cache for heavy models (shared across instances)
     _model_cache = {
@@ -237,6 +241,35 @@ class MangaTranslator:
             )
         except Exception as e:
             print(f"Gemini translation error: {e}")
+            return text
+
+    def _translate_with_freellm(self, text):
+        """
+        Translate using FreeLLM API (OpenAI Compatible).
+        For batch processing, use FreeLLMTranslator directly.
+        """
+        try:
+            if self._freellm_translator is None:
+                from .freellm_translator import FreeLLMTranslator
+                api_key = getattr(self, '_freellm_api_key', None) or self.freellm_api_key
+                base_url = getattr(self, '_freellm_base_url', None) or self.freellm_base_url
+                if not api_key:
+                    raise ValueError("FreeLLM API key required. Please enter it in the web form.")
+                custom_prompt = getattr(self, '_freellm_custom_prompt', None)
+                self._freellm_translator = FreeLLMTranslator(
+                    api_key=api_key, 
+                    base_url=base_url,
+                    custom_prompt=custom_prompt
+                )
+                print(f"FreeLLM translator initialized! (source={self.source}, target={self.target})")
+            
+            return self._freellm_translator.translate_single(
+                text, 
+                source=self.source, 
+                target=self.target
+            )
+        except Exception as e:
+            print(f"FreeLLM translation error: {e}")
             return text
 
     def _preprocess_text(self, text):

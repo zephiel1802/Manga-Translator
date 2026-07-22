@@ -1,9 +1,8 @@
 """
-Gemini Translator with Batch Processing
-Uses Gemini 2.5 Flash-Lite for cost-effective translation
-Supports multiple source languages and custom prompts
+FreeLLM Translator with Batch Processing
+Uses OpenAI-compatible FreeLLMAPI endpoint
 """
-from google import genai
+from openai import OpenAI
 import json
 import os
 import time
@@ -16,33 +15,38 @@ if TYPE_CHECKING:
 
 # Constants for retry logic
 MAX_RETRIES = 3
-RETRY_DELAY_BASE = 0.5  # Faster recovery: 0.5s → 1s → 2s
+RETRY_DELAY_BASE = 0.5
 
-
-class GeminiTranslator(BaseTranslator):
+class FreeLLMTranslator(BaseTranslator):
     """
-    Translator using Google Gemini 2.5 Flash-Lite.
-    Supports batch translation to minimize API calls.
+    Translator using FreeLLMAPI (OpenAI compatible).
+    Supports batch translation.
     """
     
-    def __init__(self, api_key: str = None, custom_prompt: str = None, style: str = "default"):
+    def __init__(self, api_key: str = None, base_url: str = None, custom_prompt: str = None, style: str = "default"):
         """
-        Initialize Gemini translator.
+        Initialize FreeLLM translator.
         
         Args:
-            api_key: Gemini API key. If None, reads from GEMINI_API_KEY env var.
+            api_key: FreeLLM API key.
+            base_url: FreeLLM base URL (e.g., http://127.0.0.1:31415/v1).
             custom_prompt: Custom instructions for translation style.
             style: Preset style name from STYLE_PRESETS.
         """
         super().__init__(custom_prompt=custom_prompt, style=style)
         
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.api_key = api_key or os.environ.get("FREELLM_API_KEY")
+        self.base_url = base_url or os.environ.get("FREELLM_BASE_URL", "http://127.0.0.1:31415/v1")
+        
         if not self.api_key:
-            raise ValueError("Gemini API key required. Set GEMINI_API_KEY or pass api_key.")
-        
-        self.client = genai.Client(api_key=self.api_key)
-        self.model = "gemini-2.5-flash-lite"
-        
+            raise ValueError("FreeLLM API key required.")
+            
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
+        # Using "auto" model will let FreeLLMAPI router pick the best model according to its strategy
+        self.model = "auto" 
         
     def translate_single(
         self, 
@@ -51,18 +55,7 @@ class GeminiTranslator(BaseTranslator):
         target: str = "en",
         custom_prompt: str = None
     ) -> str:
-        """
-        Translate a single text string.
-        
-        Args:
-            text: Text to translate
-            source: Source language code (ja, zh, ko, etc.)
-            target: Target language code
-            custom_prompt: Override custom prompt for this call
-            
-        Returns:
-            Translated text
-        """
+        """Translate a single text string."""
         if not text or not text.strip():
             return text
             
@@ -71,7 +64,7 @@ class GeminiTranslator(BaseTranslator):
         style = custom_prompt or self.custom_prompt
         style_text = f"\nStyle: {style}" if style else ""
         
-        prompt = f"""You are an expert manga/comic translator specializing in {source_name} to {target_name} translation.
+        system_prompt = f"""You are an expert manga/comic translator specializing in {source_name} to {target_name} translation.
 
 Translation Guidelines:
 - Translate for SPOKEN dialogue, not written text. It should sound natural when read aloud.
@@ -81,20 +74,22 @@ Translation Guidelines:
 - Keep exclamations and emotional expressions feeling authentic.
 - Maintain the impact and rhythm of short/punchy lines.{style_text}
 
-IMPORTANT: Return ONLY the translated text. No explanations, no quotes, no formatting.
+IMPORTANT: Return ONLY the translated text. No explanations, no quotes, no formatting."""
 
-Original text: {text}"""
-        
         try:
-            response = self.client.models.generate_content(
+            response = self.client.chat.completions.create(
                 model=self.model,
-                contents=prompt
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Original text: {text}"}
+                ],
+                temperature=0.3,
             )
-            return response.text.strip()
+            return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"Gemini translation error: {e}")
+            print(f"FreeLLM translation error: {e}")
             return text
-    
+
     def translate_batch(
         self, 
         texts: List[str], 
@@ -102,22 +97,10 @@ Original text: {text}"""
         target: str = "en",
         custom_prompt: str = None
     ) -> List[str]:
-        """
-        Translate multiple texts in a single API call with retry logic.
-        
-        Args:
-            texts: List of texts to translate
-            source: Source language code
-            target: Target language code
-            custom_prompt: Override custom prompt for this call
-            
-        Returns:
-            List of translated texts (same order)
-        """
+        """Translate multiple texts in a single API call with retry logic."""
         if not texts:
             return []
             
-        # Filter empty texts but keep track of indices
         indexed_texts = [(i, t) for i, t in enumerate(texts) if t and t.strip()]
         
         if not indexed_texts:
@@ -126,7 +109,6 @@ Original text: {text}"""
         texts_to_translate = [t for _, t in indexed_texts]
         translations = self._translate_batch_internal(texts_to_translate, source, target, custom_prompt)
         
-        # Rebuild full list with original empty strings preserved
         result = list(texts)
         for (orig_idx, _), trans in zip(indexed_texts, translations):
             result[orig_idx] = trans
@@ -140,14 +122,32 @@ Original text: {text}"""
         target: str,
         custom_prompt: str = None
     ) -> List[str]:
-        """Internal method to translate a single chunk with retry logic."""
+        """Internal method to translate texts by chunking them."""
+        CHUNK_SIZE = 10
+        all_translations = []
+        
+        for i in range(0, len(texts_to_translate), CHUNK_SIZE):
+            chunk = texts_to_translate[i:i+CHUNK_SIZE]
+            chunk_translations = self._translate_chunk(chunk, source, target, custom_prompt)
+            all_translations.extend(chunk_translations)
+            
+        return all_translations
+
+    def _translate_chunk(
+        self,
+        texts_to_translate: List[str],
+        source: str,
+        target: str,
+        custom_prompt: str = None
+    ) -> List[str]:
+        """Translate a single chunk of texts."""
         source_name = self.LANG_NAMES.get(source, "Japanese")
         target_name = self.LANG_NAMES.get(target, "English")
         
         style = custom_prompt or self.custom_prompt
         style_text = f"\nStyle instructions: {style}" if style else ""
         
-        prompt = f"""Bạn là chuyên gia dịch manga/comic từ {source_name} sang {target_name}.
+        system_prompt = f"""Bạn là chuyên gia dịch manga/comic từ {source_name} sang {target_name}.
 
 QUY TẮC DỊCH:
 1. ĐÂY LÀ HỘI THOẠI NÓI - phải nghe tự nhiên như người thật nói chuyện
@@ -167,20 +167,23 @@ HƯỚNG DẪN CHO TIẾNG VIỆT:
 - Câu cảm thán: ôi, trời ơi, ủa, hả, ê, này...
 - TRÁNH: dịch kiểu sách giáo khoa, dùng từ Hán Việt quá nhiều, câu dài lê thê{style_text}
 
-Input texts (JSON array - mỗi item là 1 bubble):
-{json.dumps(texts_to_translate, ensure_ascii=False)}
-
 IMPORTANT: Trả về ĐÚNG JSON array với bản dịch theo THỨ TỰ GIỐNG HỆT.
 Format: ["bản dịch 1", "bản dịch 2", ...]"""
+
+        user_content = f"Input texts (JSON array - mỗi item là 1 bubble):\n{json.dumps(texts_to_translate, ensure_ascii=False)}"
         
-        # Retry with exponential backoff
         for attempt in range(MAX_RETRIES):
             try:
-                response = self.client.models.generate_content(
+                response = self.client.chat.completions.create(
                     model=self.model,
-                    contents=prompt
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                    temperature=0.3,
+                    max_tokens=4000,
                 )
-                result_text = response.text.strip()
+                result_text = response.choices[0].message.content.strip()
                 
                 # Clean up response if needed
                 if result_text.startswith("```json"):
@@ -193,7 +196,6 @@ Format: ["bản dịch 1", "bản dịch 2", ...]"""
                 
                 translations = json.loads(result_text)
                 
-                # Validate response length
                 if len(translations) != len(texts_to_translate):
                     raise ValueError(f"Expected {len(texts_to_translate)} translations, got {len(translations)}")
                 
@@ -201,24 +203,19 @@ Format: ["bản dịch 1", "bản dịch 2", ...]"""
                 
             except Exception as e:
                 error_str = str(e)
-                print(f"Gemini batch attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+                print(f"FreeLLM batch attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
                 
-                # Check if it's a quota error - don't retry or fallback
                 if "429" in error_str or "quota" in error_str.lower():
-                    print("⚠️ Quota exceeded! Returning original texts to avoid more API calls.")
-                    print("   Wait 1 minute or upgrade your Gemini API plan.")
-                    return texts_to_translate  # Return original texts
+                    print("⚠️ Quota exceeded! Returning original texts.")
+                    return texts_to_translate
                 
                 if attempt < MAX_RETRIES - 1:
                     delay = RETRY_DELAY_BASE * (2 ** attempt)
-                    print(f"Retrying in {delay}s...")
                     time.sleep(delay)
                 else:
-                    # Only fallback to single translations if NOT quota error
-                    print("All retries failed, falling back to single translations")
                     return [self.translate_single(t, source, target) for t in texts_to_translate]
         
-        return texts_to_translate  # Fallback: return original
+        return texts_to_translate
     
     def translate_pages_batch(
         self, 
@@ -228,20 +225,7 @@ Format: ["bản dịch 1", "bản dịch 2", ...]"""
         custom_prompt: str = None,
         context_memory: 'ContextMemory' = None
     ) -> Dict[str, List[str]]:
-        """
-        Translate texts from multiple pages in a single API call.
-        Ideal for batch processing 10 manga pages at once.
-        
-        Args:
-            pages_texts: Dict mapping page names to list of texts
-            source: Source language code
-            target: Target language code
-            custom_prompt: Override custom prompt for this call
-            context_memory: Optional ContextMemory object for consistent translation
-            
-        Returns:
-            Dict with same structure but translated texts
-        """
+        """Translate texts from multiple pages in a single API call."""
         if not pages_texts:
             return {}
         
@@ -251,12 +235,11 @@ Format: ["bản dịch 1", "bản dịch 2", ...]"""
         style = custom_prompt or self.custom_prompt
         style_text = f"\nStyle instructions: {style}" if style else ""
         
-        # Build context section from ContextMemory if provided
         context_section = ""
         if context_memory:
             context_section = context_memory.generate_context_prompt()
         
-        prompt = f"""Bạn là chuyên gia dịch manga/comic từ {source_name} sang {target_name}.
+        system_prompt = f"""Bạn là chuyên gia dịch manga/comic từ {source_name} sang {target_name}.
 {context_section}
 Đây là các trang LIÊN TIẾP trong cùng 1 story. Giữ mạch truyện và giọng nhân vật nhất quán.
 
@@ -290,20 +273,22 @@ HƯỚNG DẪN CHO TIẾNG VIỆT:
   + Thêm thắt dài dòng không cần thiết
   + Giữ nguyên cấu trúc câu gốc{style_text}
 
-Input (JSON - các trang liên tiếp):
-{json.dumps(pages_texts, ensure_ascii=False, indent=2)}
-
 IMPORTANT: Trả về ĐÚNG JSON object với cấu trúc GIỐNG HỆT nhưng đã dịch.
 Giữ nguyên tên page và thứ tự bubble. Không giải thích, không markdown."""
 
+        user_content = f"Input (JSON - các trang liên tiếp):\n{json.dumps(pages_texts, ensure_ascii=False, indent=2)}"
+
         try:
-            response = self.client.models.generate_content(
+            response = self.client.chat.completions.create(
                 model=self.model,
-                contents=prompt
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                temperature=0.3,
             )
-            result_text = response.text.strip()
+            result_text = response.choices[0].message.content.strip()
             
-            # Clean up response
             if result_text.startswith("```json"):
                 result_text = result_text[7:]
             if result_text.startswith("```"):
@@ -315,8 +300,7 @@ Giữ nguyên tên page và thứ tự bubble. Không giải thích, không mark
             return json.loads(result_text)
             
         except Exception as e:
-            print(f"Gemini pages batch translation error: {e}")
-            # Fallback: translate each page separately
+            print(f"FreeLLM pages batch translation error: {e}")
             result = {}
             for page_name, texts in pages_texts.items():
                 result[page_name] = self.translate_batch(texts, source, target)

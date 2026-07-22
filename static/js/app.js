@@ -43,16 +43,24 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (selectBox.id === 'translator') {
                     const copilotSettings = document.getElementById('copilot-settings');
                     const geminiSettings = document.getElementById('gemini-settings');
+                    const freellmSettings = document.getElementById('freellm-settings');
 
                     if (option.textContent === 'Local LLM') {
                         copilotSettings.style.display = 'block';
                         geminiSettings.style.display = 'none';
+                        freellmSettings.style.display = 'none';
                     } else if (option.textContent === 'Gemini') {
                         copilotSettings.style.display = 'none';
                         geminiSettings.style.display = 'block';
+                        freellmSettings.style.display = 'none';
+                    } else if (option.textContent === 'FreeLLM') {
+                        copilotSettings.style.display = 'none';
+                        geminiSettings.style.display = 'none';
+                        freellmSettings.style.display = 'block';
                     } else {
                         copilotSettings.style.display = 'none';
                         geminiSettings.style.display = 'none';
+                        freellmSettings.style.display = 'none';
                     }
                 }
             });
@@ -92,15 +100,23 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (selectBox.id === 'translator') {
                             const copilotSettings = document.getElementById('copilot-settings');
                             const geminiSettings = document.getElementById('gemini-settings');
+                            const freellmSettings = document.getElementById('freellm-settings');
                             if (savedValue === 'Local LLM') {
                                 copilotSettings.style.display = 'block';
                                 geminiSettings.style.display = 'none';
+                                freellmSettings.style.display = 'none';
                             } else if (savedValue === 'Gemini') {
                                 copilotSettings.style.display = 'none';
                                 geminiSettings.style.display = 'block';
+                                freellmSettings.style.display = 'none';
+                            } else if (savedValue === 'FreeLLM') {
+                                copilotSettings.style.display = 'none';
+                                geminiSettings.style.display = 'none';
+                                freellmSettings.style.display = 'block';
                             } else {
                                 copilotSettings.style.display = 'none';
                                 geminiSettings.style.display = 'none';
+                                freellmSettings.style.display = 'none';
                             }
                         }
                     }
@@ -118,6 +134,29 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         geminiKeyInput.addEventListener('input', () => {
             localStorage.setItem('gemini_api_key', geminiKeyInput.value);
+        });
+    }
+
+    // Load saved FreeLLM API key and URL from localStorage
+    const freellmKeyInput = document.getElementById('freellm_api_key');
+    if (freellmKeyInput) {
+        const savedKey = localStorage.getItem('freellm_api_key');
+        if (savedKey) {
+            freellmKeyInput.value = savedKey;
+        }
+        freellmKeyInput.addEventListener('input', () => {
+            localStorage.setItem('freellm_api_key', freellmKeyInput.value);
+        });
+    }
+
+    const freellmBaseUrlInput = document.getElementById('freellm_base_url');
+    if (freellmBaseUrlInput) {
+        const savedUrl = localStorage.getItem('freellm_base_url');
+        if (savedUrl) {
+            freellmBaseUrlInput.value = savedUrl;
+        }
+        freellmBaseUrlInput.addEventListener('input', () => {
+            localStorage.setItem('freellm_base_url', freellmBaseUrlInput.value);
         });
     }
 
@@ -246,6 +285,15 @@ function updateHiddenInputs() {
         const apiKey = document.getElementById('gemini_api_key').value;
         if (!apiKey || apiKey.trim() === '') {
             alert('Vui lòng nhập Gemini API Key!');
+            return false;
+        }
+    }
+    
+    // Validate FreeLLM API key if FreeLLM is selected
+    if (translator === 'FreeLLM') {
+        const apiKey = document.getElementById('freellm_api_key').value;
+        if (!apiKey || apiKey.trim() === '') {
+            alert('Vui lòng nhập FreeLLM API Key!');
             return false;
         }
     }

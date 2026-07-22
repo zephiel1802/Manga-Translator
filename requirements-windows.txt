@@ -1,3 +1,5 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
 deep-translator==1.11.4
 translators==5.9.1
 huggingface-hub==0.22.2
@@ -21,4 +23,3 @@ chrome-lens-py>=3.0.0
 google-genai>=0.1.0
 openai>=1.0.0
 protobuf>=7.0.0
-gunicorn==21.2.0  # Linux/Mac only, remove the '#' if you're not on Windows
