@@ -793,8 +793,14 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                             all_translations[name] = translator.translate_batch(
                                 texts, manga_translator.source, manga_translator.target
                             )
+                            time.sleep(2)  # Delay between individual translations
                         except:
                             all_translations[name] = texts  # Return original on error
+                
+                # Delay between batches to avoid rate limiting
+                if i + batch_size < len(page_names):
+                    time.sleep(3)
+                    print(f"    (3s delay between batches to avoid rate limit)")
     
     translation_time = time.time() - start_time - detection_time
     print(f"✓ Translation completed in {translation_time:.1f}s")

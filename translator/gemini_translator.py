@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from .context_memory import ContextMemory
 
 # Constants for retry logic
-MAX_RETRIES = 3
-RETRY_DELAY_BASE = 0.5  # Faster recovery: 0.5s → 1s → 2s
+MAX_RETRIES = 5
+RETRY_DELAY_BASE = 3  # Exponential backoff: 3s → 6s → 12s → 24s → 48s
 
 # Path to service account JSON (same as Google Vision)
 DEFAULT_CREDENTIALS_PATH = os.path.join(
@@ -262,11 +262,16 @@ Format: ["bản dịch 1", "bản dịch 2", ...]"""
                 error_str = str(e)
                 print(f"Gemini batch attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
                 
-                # Check if it's a quota error - don't retry or fallback
-                if "429" in error_str or "quota" in error_str.lower():
-                    print("⚠️ Quota exceeded! Returning original texts to avoid more API calls.")
-                    print("   Wait 1 minute or upgrade your Gemini API plan.")
-                    return texts_to_translate  # Return original texts
+                # Check if it's a quota error - wait and retry with longer delay
+                if "429" in error_str or "quota" in error_str.lower() or "RESOURCE_EXHAUSTED" in error_str:
+                    wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s...
+                    print(f"⚠️ Rate limit hit! Waiting {wait_time}s before retry {attempt + 2}/{MAX_RETRIES}...")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print("⚠️ Rate limit persists after all retries. Returning original texts.")
+                        return texts_to_translate
                 
                 if attempt < MAX_RETRIES - 1:
                     delay = RETRY_DELAY_BASE * (2 ** attempt)
@@ -362,28 +367,52 @@ Input (JSON - các trang liên tiếp):
 IMPORTANT: Trả về ĐÚNG JSON object với cấu trúc GIỐNG HỆT nhưng đã dịch.
 Giữ nguyên tên page và thứ tự bubble. Không giải thích, không markdown."""
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt
-            )
-            result_text = response.text.strip()
-            
-            # Clean up response
-            if result_text.startswith("```json"):
-                result_text = result_text[7:]
-            if result_text.startswith("```"):
-                result_text = result_text[3:]
-            if result_text.endswith("```"):
-                result_text = result_text[:-3]
-            result_text = result_text.strip()
-            
-            return json.loads(result_text)
-            
-        except Exception as e:
-            print(f"Gemini pages batch translation error: {e}")
-            # Fallback: translate each page separately
-            result = {}
-            for page_name, texts in pages_texts.items():
-                result[page_name] = self.translate_batch(texts, source, target)
-            return result
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt
+                )
+                result_text = response.text.strip()
+                
+                # Clean up response
+                if result_text.startswith("```json"):
+                    result_text = result_text[7:]
+                if result_text.startswith("```"):
+                    result_text = result_text[3:]
+                if result_text.endswith("```"):
+                    result_text = result_text[:-3]
+                result_text = result_text.strip()
+                
+                return json.loads(result_text)
+                
+            except Exception as e:
+                error_str = str(e)
+                print(f"Gemini pages batch translation error (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                
+                # Rate limit - wait with exponential backoff
+                if "429" in error_str or "quota" in error_str.lower() or "RESOURCE_EXHAUSTED" in error_str:
+                    wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s...
+                    print(f"⚠️ Rate limit hit! Waiting {wait_time}s before retry...")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print("⚠️ Rate limit persists. Returning original texts.")
+                        return pages_texts
+                
+                # Other errors - shorter retry
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_DELAY_BASE * (2 ** attempt)
+                    print(f"Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    # Fallback: translate each page separately
+                    print("All retries failed, falling back to per-page translation")
+                    result = {}
+                    for page_name, texts in pages_texts.items():
+                        result[page_name] = self.translate_batch(texts, source, target)
+                        time.sleep(2)  # Delay between per-page calls
+                    return result
+        
+        return pages_texts  # Final fallback
