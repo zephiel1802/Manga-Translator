@@ -33,10 +33,26 @@ class ChromeLensOCR:
             ocr_language: BCP 47 language code for OCR (default: "ja" for Japanese)
             max_concurrent: Maximum concurrent OCR requests (default: 10)
         """
-        self.api = LensAPI()
+        import threading
         self.ocr_language = ocr_language
         self.max_concurrent = max_concurrent
         self._semaphore = None  # Created lazily when needed
+        
+        # Start a dedicated background thread for the asyncio loop
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        
+        # Initialize LensAPI inside the event loop so it binds correctly
+        future = asyncio.run_coroutine_threadsafe(self._init_api(), self._loop)
+        future.result()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def _init_api(self):
+        self.api = LensAPI()
     
     def __call__(self, image) -> str:
         """
@@ -53,18 +69,10 @@ class ChromeLensOCR:
             # Convert numpy array to PIL Image
             image = Image.fromarray(image)
         
-        # Use cached event loop to avoid overhead
-        try:
-            loop = asyncio.get_running_loop()
-            # If there's a running loop, use run_coroutine_threadsafe
-            import concurrent.futures
-            future = asyncio.run_coroutine_threadsafe(self._process(image), loop)
-            return future.result(timeout=30)
-        except RuntimeError:
-            # No running loop, create one (but try to reuse)
-            if not hasattr(self, '_loop') or self._loop.is_closed():
-                self._loop = asyncio.new_event_loop()
-            return self._loop.run_until_complete(self._process(image))
+        # Use the dedicated background event loop
+        import concurrent.futures
+        future = asyncio.run_coroutine_threadsafe(self._process(image), self._loop)
+        return future.result(timeout=30)
     
     async def _process(self, image, max_retries: int = 5) -> str:
         """
@@ -131,15 +139,9 @@ class ChromeLensOCR:
         if isinstance(image, np.ndarray):
             image = Image.fromarray(image)
             
-        try:
-            loop = asyncio.get_running_loop()
-            import concurrent.futures
-            future = asyncio.run_coroutine_threadsafe(self._process_blocks(image), loop)
-            return future.result(timeout=30)
-        except RuntimeError:
-            if not hasattr(self, '_loop') or self._loop.is_closed():
-                self._loop = asyncio.new_event_loop()
-            return self._loop.run_until_complete(self._process_blocks(image))
+        import concurrent.futures
+        future = asyncio.run_coroutine_threadsafe(self._process_blocks(image), self._loop)
+        return future.result(timeout=30)
             
     async def _process_blocks(self, image, max_retries: int = 5) -> list:
         if self._semaphore is None:
@@ -214,18 +216,12 @@ class ChromeLensOCR:
             else:
                 pil_images.append(img)
         
-        # Run batch processing
-        try:
-            loop = asyncio.get_running_loop()
-            import concurrent.futures
-            future = asyncio.run_coroutine_threadsafe(
-                self._process_batch(pil_images), loop
-            )
-            return future.result(timeout=120)
-        except RuntimeError:
-            if not hasattr(self, '_loop') or self._loop.is_closed():
-                self._loop = asyncio.new_event_loop()
-            return self._loop.run_until_complete(self._process_batch(pil_images))
+        # Run batch processing in the dedicated loop
+        import concurrent.futures
+        future = asyncio.run_coroutine_threadsafe(
+            self._process_batch(pil_images), self._loop
+        )
+        return future.result(timeout=120)
     
     async def _process_batch(self, images: list) -> list:
         """
@@ -308,5 +304,7 @@ class ChromeLensOCR:
         if isinstance(image, np.ndarray):
             image = Image.fromarray(image)
         
-        result = asyncio.run(self.process_with_blocks(image))
+        import concurrent.futures
+        future = asyncio.run_coroutine_threadsafe(self.process_with_blocks(image), self._loop)
+        result = future.result(timeout=30)
         return result.get("text_blocks", [])
