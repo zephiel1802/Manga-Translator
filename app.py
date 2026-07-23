@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, send_file, jsonify
+from flask import Flask, render_template, request, redirect, send_file, jsonify, url_for as flask_url_for
 import builtins
 import datetime
 
@@ -16,6 +16,8 @@ import json
 import warnings
 import os
 import sys
+import uuid
+import time as time_module
 
 # Suppress deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -83,6 +85,22 @@ _OCR_CACHE = {
     "chrome_lens": None,
     "manga_ocr": None
 }
+
+# Results directory for saving processed images to disk
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+def cleanup_old_results(max_age_seconds=3600):
+    """Remove result session directories older than max_age_seconds (default: 1 hour)."""
+    try:
+        cutoff = time_module.time() - max_age_seconds
+        for session_dir in os.listdir(RESULTS_DIR):
+            session_path = os.path.join(RESULTS_DIR, session_dir)
+            if os.path.isdir(session_path) and os.path.getmtime(session_path) < cutoff:
+                import shutil
+                shutil.rmtree(session_path, ignore_errors=True)
+    except Exception:
+        pass
 
 def split_long_image(image: np.ndarray, max_height_ratio: float = DEFAULT_SPLIT_HEIGHT_RATIO) -> list:
     """
@@ -368,10 +386,11 @@ def get_font_path(font_name: str) -> str:
         return f"fonts/{font_name}.ttf"
 
 
-def process_images_with_batch(images_data, manga_translator, mocr, selected_font, translator_type, batch_size=10, use_context_memory=True, enable_black_bubble=True):
+def process_images_with_batch(images_data, manga_translator, mocr, selected_font, translator_type, batch_size=10, use_context_memory=True, enable_black_bubble=True, ocr_engine_name="", source_lang="", target_lang="", style=""):
     """
     Process multiple images with multi-page batching for Copilot or Gemini.
     Collects all texts first, batch translates, then applies translations.
+    Supports caching OCR + translation results to avoid re-processing.
     
     Args:
         images_data: List of dicts with 'image', 'name' keys
@@ -381,12 +400,19 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         translator_type: 'copilot' or 'gemini' or 'freellm'
         batch_size: Number of pages per API call
         use_context_memory: Whether to include context from all pages for better translation
+        ocr_engine_name: OCR engine name for cache key
+        source_lang: Source language for cache key
+        target_lang: Target language for cache key
+        style: Translation style for cache key
         
     Returns:
         List of processed images with translations applied
     """
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from translator.translation_cache import get_cache
+    
+    cache = get_cache()
     
     def emit_progress(phase, current, total, message):
         """Emit progress update via WebSocket."""
@@ -409,6 +435,23 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     # Check if using Chrome Lens OCR (has batch support)
     use_batch_ocr = hasattr(mocr, 'process_batch')
     
+    # Pre-check cache for all images
+    cached_pages = {}  # {page_name: cached_data}
+    cache_hits = 0
+    for img_data in images_data:
+        image = img_data['image']
+        name = img_data['name']
+        _, img_encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        image_bytes = img_encoded.tobytes()
+        cached = cache.get(image_bytes, ocr_engine_name, source_lang, translator_type, target_lang, style)
+        if cached:
+            cached_pages[name] = cached
+            cache_hits += 1
+    
+    if cache_hits > 0:
+        print(f"📦 Cache: {cache_hits}/{total_images} pages found in cache (skipping OCR + translation)")
+        emit_progress('cache', cache_hits, total_images, f'Tìm thấy {cache_hits}/{total_images} trang trong cache')
+
     # Phase 1a: Detect bubbles and collect all bubble images
     print("\n[Phase 1] Detecting bubbles...")
     emit_progress('detection', 0, total_images, 'Bắt đầu phát hiện speech bubbles...')
@@ -647,10 +690,33 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     
     # Phase 3: Batch translate all pages together
     emit_progress('translation', 0, 1, 'Đang dịch...')
-    pages_texts = {name: data['texts'] for name, data in all_pages_data.items() if data['texts']}
-    all_translations = {}
     
-    if pages_texts:
+    # Separate cached vs uncached pages
+    all_translations = {}
+    uncached_pages_texts = {}
+    
+    for name, data in all_pages_data.items():
+        if name in cached_pages and data['texts']:
+            # Use cached translations
+            cached = cached_pages[name]
+            cached_ocr = cached.get('ocr_texts', [])
+            cached_trans = cached.get('translated_texts', [])
+            
+            # Verify cache matches current bubble count
+            if len(cached_trans) == len(data['texts']):
+                all_translations[name] = cached_trans
+                # Also replace OCR texts with cached ones for logging
+                data['texts'] = cached_ocr if len(cached_ocr) == len(data['texts']) else data['texts']
+                print(f"  [✓ CACHED] {name}: {len(cached_trans)} translations")
+            else:
+                # Cache mismatch (different bubble count), need to re-translate
+                print(f"  [✗ CACHE MISMATCH] {name}: cached={len(cached_trans)}, current={len(data['texts'])}")
+                if data['texts']:
+                    uncached_pages_texts[name] = data['texts']
+        elif data['texts']:
+            uncached_pages_texts[name] = data['texts']
+    
+    if uncached_pages_texts:
         # Get the translator based on type
         if translator_type == "copilot" and hasattr(manga_translator, '_local_llm_translator') and manga_translator._local_llm_translator:
             translator = manga_translator._local_llm_translator
@@ -666,7 +732,9 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             translator_name = "Unknown"
         
         if translator:
-            print(f"{translator_name} batch translating {len(pages_texts)} pages in chunks of {batch_size}...")
+            cached_count = len(all_translations)
+            total_count = cached_count + len(uncached_pages_texts)
+            print(f"{translator_name} batch translating {len(uncached_pages_texts)} pages in chunks of {batch_size}... ({cached_count} cached, {len(uncached_pages_texts)} new)")
             
             # Initialize context memory if enabled
             context_memory = None
@@ -675,11 +743,11 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                 print(f"  Context Memory enabled - tracking terms and story context")
             
             # Process in batches
-            page_names = list(pages_texts.keys())
+            page_names = list(uncached_pages_texts.keys())
             
             for i in range(0, len(page_names), batch_size):
                 batch_names = page_names[i:i + batch_size]
-                batch_texts = {name: pages_texts[name] for name in batch_names}
+                batch_texts = {name: uncached_pages_texts[name] for name in batch_names}
                 
                 print(f"  Translating batch {i//batch_size + 1}: pages {i+1}-{min(i+batch_size, len(page_names))}")
                 
@@ -691,6 +759,24 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                         context_memory=context_memory
                     )
                     all_translations.update(translated)
+                    
+                    # Save new translations to cache
+                    for page_name in batch_names:
+                        if page_name in translated:
+                            # Find original image for cache key
+                            for img_data in images_data:
+                                if img_data['name'] == page_name:
+                                    _, img_enc = cv2.imencode('.jpg', img_data['image'], [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                    cache.put(
+                                        img_enc.tobytes(), ocr_engine_name, source_lang,
+                                        translator_type, target_lang, style,
+                                        {
+                                            'ocr_texts': all_pages_data[page_name]['texts'],
+                                            'translated_texts': translated[page_name],
+                                            'timestamp': time.time()
+                                        }
+                                    )
+                                    break
                     
                     # Update context memory with this batch's translations
                     if context_memory:
@@ -1046,10 +1132,19 @@ def upload_file():
             all_images, manga_translator, mocr, selected_font, 
             translator_type=selected_translator, batch_size=10,
             use_context_memory=use_context_memory,
-            enable_black_bubble=enable_black_bubble
+            enable_black_bubble=enable_black_bubble,
+            ocr_engine_name=selected_ocr,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            style=style
         )
         
-        # Encode results to base64 (with optional splitting)
+        # Save results to disk (avoid massive base64 responses for large batches)
+        session_id = uuid.uuid4().hex[:12]
+        session_dir = os.path.join(RESULTS_DIR, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+        cleanup_old_results()  # Clean up old sessions
+        
         for result in processed_results:
             try:
                 image = result['image']
@@ -1061,23 +1156,23 @@ def upload_file():
                 else:
                     chunks = [image]
                 
-                # Encode each chunk
+                # Save each chunk to disk
                 for i, chunk in enumerate(chunks):
-                    _, buffer = cv2.imencode(".jpg", chunk, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    encoded_image = base64.b64encode(buffer.tobytes()).decode("utf-8")
-                    
-                    # Add suffix if split into multiple chunks
                     if len(chunks) > 1:
                         chunk_name = f"{base_name}_part{i+1}"
                     else:
                         chunk_name = base_name
                     
+                    filename = f"{chunk_name}.jpg"
+                    filepath = os.path.join(session_dir, filename)
+                    cv2.imwrite(filepath, chunk, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    
                     processed_images.append({
                         "name": chunk_name,
-                        "data": encoded_image
+                        "url": f"/static/results/{session_id}/{filename}"
                     })
             except Exception as e:
-                print(f"Error encoding {result['name']}: {e}")
+                print(f"Error saving {result['name']}: {e}")
     
     else:
         # For other translators: Use per-image processing (original flow)
@@ -1186,6 +1281,23 @@ def download_zip():
     except Exception as e:
         print(f"Error creating ZIP: {e}")
         return redirect("/")
+
+
+@app.route("/clear-cache", methods=["POST"])
+def clear_cache():
+    """Clear translation cache and old results."""
+    try:
+        from translator.translation_cache import get_cache
+        cache = get_cache()
+        stats_before = cache.stats()
+        cache.clear()
+        cleanup_old_results(max_age_seconds=0)  # Remove all results
+        return jsonify({
+            "success": True,
+            "message": f"Đã xóa {stats_before['count']} cache entries ({stats_before['size_mb']} MB)"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 if __name__ == "__main__":

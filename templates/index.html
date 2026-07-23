@@ -257,7 +257,10 @@
          <input type="hidden" id="selected_style" name="selected_style">
          <input type="hidden" id="selected_font" name="selected_font">
          <input type="hidden" id="selected_ocr" name="selected_ocr">
-         <button type="submit">Translate</button>
+          <button type="submit">Translate</button>
+          <button type="button" id="clear-cache-btn" onclick="clearCache()" 
+             style="background: #e74c3c; margin-top: 8px; font-size: 13px; padding: 8px 16px; border: none; border-radius: 8px; color: white; cursor: pointer; width: 100%; opacity: 0.8;"
+             title="Xóa toàn bộ cache OCR + translation">🗑️ Xóa cache dịch</button>
       </form>
 
       <!-- Progress Bar -->
@@ -279,6 +282,24 @@
    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
    <script>
+      // Clear translation cache
+      async function clearCache() {
+         const btn = document.getElementById('clear-cache-btn');
+         btn.textContent = '⏳ Đang xóa...';
+         btn.disabled = true;
+         try {
+            const resp = await fetch('/clear-cache', { method: 'POST' });
+            const data = await resp.json();
+            btn.textContent = data.success ? '✅ ' + data.message : '❌ ' + data.message;
+         } catch (e) {
+            btn.textContent = '❌ Lỗi: ' + e.message;
+         }
+         setTimeout(() => {
+            btn.textContent = '🗑️ Xóa cache dịch';
+            btn.disabled = false;
+         }, 3000);
+      }
+      
       // Real-time progress updates
       document.addEventListener('DOMContentLoaded', function () {
          const socket = io();
@@ -288,6 +309,7 @@
          const progressPhase = document.getElementById('progress-phase');
 
          const phaseNames = {
+            'cache': '📦 Kiểm tra cache',
             'detection': '🔍 Phát hiện bubbles',
             'ocr': '📖 OCR nhận dạng text',
             'translation': '🌐 Dịch văn bản',
