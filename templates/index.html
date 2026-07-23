@@ -17,7 +17,7 @@
    </header>
    <div class="container">
       <img src="{{ url_for('static', filename='img/logo.png') }}" alt="Manga Translator">
-      <form action="/translate" method="post" enctype="multipart/form-data" onsubmit="return updateHiddenInputs()">
+      <form action="/translate" method="post" enctype="multipart/form-data">
 
          <!-- 2-column grid for dropdowns -->
          <div class="form-grid">
@@ -146,6 +146,10 @@
                      <span class="icon">&#9660;</span>
                   </div>
                   <div class="options">
+                     <span class="option">Google-Vision</span>
+                     <span class="option">PaddleOCR</span>
+                     <span class="option">FreeLLM-Vision</span>
+                     <span class="option">Tesseract</span>
                      <span class="option">Chrome-Lens</span>
                      <span class="option">Manga-OCR</span>
                   </div>
@@ -305,12 +309,45 @@
          });
 
          // Show progress when form submitted
-         document.querySelector('form').addEventListener('submit', function () {
+         document.querySelector('form').addEventListener('submit', function (e) {
+            e.preventDefault();
+            
+            if (!updateHiddenInputs()) {
+               return;
+            }
+
             progressContainer.style.display = 'block';
             progressBar.style.width = '0%';
             progressBar.style.background = 'linear-gradient(90deg, #5E1675, #8e44ad)';
             progressText.textContent = 'Khởi tạo...';
             progressPhase.textContent = '⏳ Chuẩn bị';
+
+            const formData = new FormData(this);
+            fetch('/translate', {
+               method: 'POST',
+               body: formData
+            })
+            .then(response => {
+               if (response.redirected) {
+                  window.location.href = response.url;
+                  return null;
+               }
+               return response.text();
+            })
+            .then(html => {
+               if (html) {
+                  document.open();
+                  document.write(html);
+                  document.close();
+               }
+            })
+            .catch(err => {
+               alert("Lỗi: " + err);
+               document.getElementById('loading-img').style.display = 'none';
+               document.getElementById('loading-p').style.display = 'none';
+               document.querySelector('form').style.display = 'block';
+               progressContainer.style.display = 'none';
+            });
          });
       });
    </script>

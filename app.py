@@ -33,6 +33,19 @@ try:
 except Exception as e:
     PCLEANER_AVAILABLE = False
     print(f"PanelCleanerZ not available, using fallback: {e}")
+    
+try:
+    from lama_inpainter import get_lama_inpainter, LAMA_AVAILABLE
+except ImportError:
+    LAMA_AVAILABLE = False
+    
+try:
+    from smart_masker import SmartMasker
+    _smart_masker = SmartMasker()
+    SMART_MASKER_AVAILABLE = True
+except ImportError:
+    SMART_MASKER_AVAILABLE = False
+    
 from translator.context_memory import ContextMemory
 from add_text import add_text
 from manga_ocr import MangaOcr
@@ -48,18 +61,6 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "secret_key")
 
 # Initialize SocketIO with auto-detected async mode
 def get_async_mode():
-    if getattr(sys, 'frozen', False):
-        return 'threading'
-    try:
-        import eventlet
-        return 'eventlet'
-    except ImportError:
-        pass
-    try:
-        import gevent
-        return 'gevent'
-    except ImportError:
-        pass
     return 'threading'
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=get_async_mode())
@@ -426,6 +427,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         
         bubble_data = []
         page_texts = []
+        cleaned_image = None
         
         if PCLEANER_AVAILABLE:
             # === PanelCleanerZ Pipeline ===
@@ -434,6 +436,19 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             cleaned_image = result['cleaned_image']
             ctd_blocks = result['text_blocks']
             mask_refined = result['mask_refined']
+            
+            # NOTE: Do NOT replace image here - OCR needs the original text!
+            # cleaned_image will be stored and applied in Phase 4 before rendering.
+            
+            # --- OUTSIDE-BUBBLE TEXT DETECTION (disabled for now) ---
+            # For Japanese manga with lots of outside-bubble text (SFX, narration),
+            # re-enable this block to use Chrome Lens detect_and_recognize_blocks
+            # to find text not covered by CTD regions.
+            # Currently disabled because calling Chrome Lens twice (full page + per-bubble)
+            # causes rate limiting and inconsistent OCR results.
+            # TODO: Re-enable with smarter rate limiting or use a separate OCR engine
+            # for outside-bubble detection.
+            # --------------------------------------
             
             print(f" - CTD found {len(ctd_blocks)} text blocks", end="", flush=True)
             
@@ -448,13 +463,33 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                     continue
                 
                 detected_region = image[y1:y2, x1:x2]
+                
+                if blk.get("from_lens"):
+                    bubble_mapping.append((name, len(page_texts)))
+                    page_texts.append(blk["pre_ocr_text"])
+                    processed_image = cv2.GaussianBlur(detected_region, (15, 15), 0)
+                    cont = np.array([[[0, 0]], [[0, y2-y1]], [[x2-x1, y2-y1]], [[x2-x1, 0]]], dtype=np.int32)
+                    bubble_data.append({
+                        'detected_image': processed_image,
+                        'contour': cont,
+                        'coords': (x1, y1, x2, y2),
+                        'is_dark': False,
+                        'fill_color': (255, 255, 255),
+                        'requires_stroke': True
+                    })
+                    continue
+                
                 cleaned_region = cleaned_image[y1:y2, x1:x2]
                 
                 # OCR on the original (uncleaned) image region
-                im = Image.fromarray(detected_region)
-                all_bubble_images.append(im)
-                bubble_mapping.append((name, len(page_texts)))
-                page_texts.append(None)  # Placeholder
+                if "pre_ocr_text" in blk:
+                    bubble_mapping.append((name, len(page_texts)))
+                    page_texts.append(blk["pre_ocr_text"])
+                else:
+                    im = Image.fromarray(detected_region)
+                    all_bubble_images.append(im)
+                    bubble_mapping.append((name, len(page_texts)))
+                    page_texts.append(None)  # Placeholder
                 
                 # Determine if dark bubble from CTD colors
                 bg_r, bg_g, bg_b = blk['bg_color']
@@ -577,6 +612,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         
         all_pages_data[name] = {
             'image': image,
+            'cleaned_image': cleaned_image,
             'bubbles': bubble_data,
             'texts': page_texts
         }
@@ -695,7 +731,19 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         bubbles = data['bubbles']
         translated_texts = all_translations.get(name, data['texts'])  # Fallback to original
         
-        # Apply text to bubbles on the ORIGINAL image
+        print(f"  [{name}] {len(bubbles)} bubbles, font={font_path}")
+        
+        # Log full text: original OCR vs translated
+        original_texts = data['texts']
+        for i, (orig, trans) in enumerate(zip(original_texts, translated_texts)):
+            print(f"    [{i+1}] OCR: {orig}")
+            print(f"         -> : {trans}")
+        
+        # Apply cleaned image (text erased) before rendering translated text
+        if data.get('cleaned_image') is not None:
+            image[:] = data['cleaned_image']
+        
+        # Apply text to bubbles on the CLEANED image
         for bubble, text in zip(bubbles, translated_texts):
             x1, y1, x2, y2 = bubble['coords']
             # Get the region in the original image (this is a view, modifications affect original)
@@ -861,10 +909,40 @@ def upload_file():
         manga_translator._copilot_model = copilot_model
         print(f"Using Local LLM: {copilot_server} / model: {copilot_model}")
     
-    if selected_ocr == "chrome-lens":
+    if selected_ocr == "paddleocr":
+        if _OCR_CACHE.get("paddleocr") is None:
+            from ocr.paddle_ocr import PaddleOcrEngine
+            _OCR_CACHE["paddleocr"] = PaddleOcrEngine(ocr_language=source_lang)
+        mocr = _OCR_CACHE["paddleocr"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "google-vision":
+        if _OCR_CACHE.get("google_vision") is None:
+            from ocr.google_vision_ocr import GoogleVisionOCR
+            _OCR_CACHE["google_vision"] = GoogleVisionOCR(ocr_language=source_lang)
+        mocr = _OCR_CACHE["google_vision"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "freellm-vision":
+        if _OCR_CACHE.get("freellm_vision") is None:
+            from ocr.freellm_vision_ocr import FreeLLMVisionOCR
+            _OCR_CACHE["freellm_vision"] = FreeLLMVisionOCR(
+                api_key=freellm_api_key or os.environ.get("FREELLM_API_KEY"),
+                base_url=freellm_base_url or os.environ.get("FREELLM_BASE_URL"),
+                ocr_language=source_lang
+            )
+        mocr = _OCR_CACHE["freellm_vision"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "tesseract":
+        if _OCR_CACHE.get("tesseract") is None:
+            from ocr.tesseract_ocr import TesseractOCR
+            _OCR_CACHE["tesseract"] = TesseractOCR(ocr_language=source_lang)
+        mocr = _OCR_CACHE["tesseract"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "chrome-lens":
         if _OCR_CACHE["chrome_lens"] is None:
-            _OCR_CACHE["chrome_lens"] = ChromeLensOCR()
+            _OCR_CACHE["chrome_lens"] = ChromeLensOCR(ocr_language=source_lang)
         mocr = _OCR_CACHE["chrome_lens"]
+        if hasattr(mocr, 'ocr_language'):
+            mocr.ocr_language = source_lang
     else:
         if _OCR_CACHE["manga_ocr"] is None:
             _OCR_CACHE["manga_ocr"] = MangaOcr()
@@ -889,8 +967,8 @@ def upload_file():
     processed_images = []
     auto_font_determined = False  # Flag to analyze font only once
     
-    # For Local LLM and Gemini: Use multi-page batch processing
-    if selected_translator in ["copilot", "gemini"]:
+    # For Local LLM, Gemini and FreeLLM: Use multi-page batch processing
+    if selected_translator in ["copilot", "gemini", "freellm"]:
         # First, read all images into memory
         all_images = []
         for file in files:

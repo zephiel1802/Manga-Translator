@@ -43,7 +43,8 @@ class FreeLLMTranslator(BaseTranslator):
             
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            timeout=60.0
         )
         # Using "auto" model will let FreeLLMAPI router pick the best model according to its strategy
         self.model = "auto" 
