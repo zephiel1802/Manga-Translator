@@ -279,15 +279,7 @@ function updateHiddenInputs() {
     document.getElementById("selected_font").value = getSelectedText("font");
     document.getElementById("selected_ocr").value = getSelectedText("ocr");
 
-    // Validate Gemini API key if Gemini is selected
-    const translator = getSelectedText("translator");
-    if (translator === 'Gemini') {
-        const apiKey = document.getElementById('gemini_api_key').value;
-        if (!apiKey || apiKey.trim() === '') {
-            alert('Vui lòng nhập Gemini API Key!');
-            return false;
-        }
-    }
+    // Gemini API key is optional (backend falls back to service account JSON)
     
     // Validate FreeLLM API key if FreeLLM is selected
     if (translator === 'FreeLLM') {

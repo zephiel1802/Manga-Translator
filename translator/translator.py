@@ -225,8 +225,6 @@ class MangaTranslator:
             if self._gemini_translator is None:
                 from .gemini_translator import GeminiTranslator
                 api_key = getattr(self, '_gemini_api_key', None) or self.gemini_api_key
-                if not api_key:
-                    raise ValueError("Gemini API key required. Please enter it in the web form.")
                 custom_prompt = getattr(self, '_gemini_custom_prompt', None)
                 self._gemini_translator = GeminiTranslator(
                     api_key=api_key, 

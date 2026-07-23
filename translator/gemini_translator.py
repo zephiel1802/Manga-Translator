@@ -2,8 +2,10 @@
 Gemini Translator with Batch Processing
 Uses Gemini 2.5 Flash-Lite for cost-effective translation
 Supports multiple source languages and custom prompts
+Supports both API key auth and Service Account JSON auth
 """
 from google import genai
+from google.genai.types import HttpOptions
 import json
 import os
 import time
@@ -18,30 +20,73 @@ if TYPE_CHECKING:
 MAX_RETRIES = 3
 RETRY_DELAY_BASE = 0.5  # Faster recovery: 0.5s → 1s → 2s
 
+# Path to service account JSON (same as Google Vision)
+DEFAULT_CREDENTIALS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "google_vision_credentials.json"
+)
+
 
 class GeminiTranslator(BaseTranslator):
     """
     Translator using Google Gemini 2.5 Flash-Lite.
     Supports batch translation to minimize API calls.
+    Auth priority: API key → GEMINI_API_KEY env → Service Account JSON.
     """
     
     def __init__(self, api_key: str = None, custom_prompt: str = None, style: str = "default"):
         """
         Initialize Gemini translator.
         
+        Auth priority:
+          1. api_key parameter (direct API key)
+          2. GEMINI_API_KEY environment variable
+          3. Service Account JSON (google_vision_credentials.json or GOOGLE_APPLICATION_CREDENTIALS)
+        
         Args:
-            api_key: Gemini API key. If None, reads from GEMINI_API_KEY env var.
+            api_key: Gemini API key. If None, tries env var, then service account JSON.
             custom_prompt: Custom instructions for translation style.
             style: Preset style name from STYLE_PRESETS.
         """
         super().__init__(custom_prompt=custom_prompt, style=style)
         
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError("Gemini API key required. Set GEMINI_API_KEY or pass api_key.")
-        
-        self.client = genai.Client(api_key=self.api_key)
         self.model = "gemini-2.5-flash-lite"
+        
+        if self.api_key:
+            # Auth method 1: API key (Google AI Studio)
+            self.client = genai.Client(api_key=self.api_key)
+            print("✓ Gemini: Authenticated with API key")
+        else:
+            # Auth method 2: Service Account JSON (Google Cloud / Vertex AI)
+            credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            
+            # Auto-detect credentials file if not set
+            if not credentials_path and os.path.exists(DEFAULT_CREDENTIALS_PATH):
+                credentials_path = DEFAULT_CREDENTIALS_PATH
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+            
+            if not credentials_path or not os.path.exists(credentials_path):
+                raise ValueError(
+                    "Gemini auth required. Either:\n"
+                    "  1. Enter API key in web form (get from https://aistudio.google.com/apikey)\n"
+                    "  2. Place google_vision_credentials.json in project root"
+                )
+            
+            # Read project_id from credentials JSON
+            with open(credentials_path, 'r') as f:
+                creds_data = json.load(f)
+            project_id = creds_data.get("project_id")
+            if not project_id:
+                raise ValueError(f"No project_id found in {credentials_path}")
+            
+            self.client = genai.Client(
+                vertexai=True,
+                project=project_id,
+                location="us-central1",
+                http_options=HttpOptions(api_version="v1")
+            )
+            print(f"✓ Gemini: Authenticated with Service Account ({os.path.basename(credentials_path)}, project={project_id})")
         
         
     def translate_single(
@@ -72,6 +117,13 @@ class GeminiTranslator(BaseTranslator):
         style_text = f"\nStyle: {style}" if style else ""
         
         prompt = f"""You are an expert manga/comic translator specializing in {source_name} to {target_name} translation.
+
+OCR ERROR CORRECTION (CRITICAL):
+The input text was extracted by OCR and may contain errors:
+- Similar-looking characters confused (e.g. 寶→真, 偷→倫, rn→m, l→1→!)
+- Wrong punctuation (e.g. 'l' or '1' may actually be '!')
+- Minor word order mistakes
+Use full sentence context to AUTO-CORRECT these errors before translating.
 
 Translation Guidelines:
 - Translate for SPOKEN dialogue, not written text. It should sound natural when read aloud.
@@ -148,6 +200,13 @@ Original text: {text}"""
         style_text = f"\nStyle instructions: {style}" if style else ""
         
         prompt = f"""Bạn là chuyên gia dịch manga/comic từ {source_name} sang {target_name}.
+
+SỬA LỖI OCR (QUAN TRỌNG):
+Văn bản đầu vào được trích xuất từ máy quét OCR nên CÓ THỂ bị lỗi:
+- Nhầm lẫn chữ có nét giống nhau (ví dụ: 寶→真, 偷→倫, rn→m, l→1→!)
+- Nhầm dấu câu (chữ 'l' hoặc số '1' thực chất là dấu chấm than '!')
+- Sai trật tự một số từ nhỏ
+Hãy dựa vào ngữ cảnh toàn câu để TỰ ĐỘNG SỬA các lỗi OCR trước khi dịch.
 
 QUY TẮC DỊCH:
 1. ĐÂY LÀ HỘI THOẠI NÓI - phải nghe tự nhiên như người thật nói chuyện
@@ -259,6 +318,13 @@ Format: ["bản dịch 1", "bản dịch 2", ...]"""
         prompt = f"""Bạn là chuyên gia dịch manga/comic từ {source_name} sang {target_name}.
 {context_section}
 Đây là các trang LIÊN TIẾP trong cùng 1 story. Giữ mạch truyện và giọng nhân vật nhất quán.
+
+SỬA LỖI OCR (QUAN TRỌNG):
+Văn bản đầu vào được trích xuất từ máy quét OCR nên CÓ THỂ bị lỗi:
+- Nhầm lẫn chữ có nét giống nhau (ví dụ: 寶→真, 偷→倫, rn→m, l→1→!)
+- Nhầm dấu câu (chữ 'l' hoặc số '1' thực chất là dấu chấm than '!')
+- Sai trật tự một số từ nhỏ
+Hãy dựa vào ngữ cảnh toàn câu để TỰ ĐỘNG SỬA các lỗi OCR trước khi dịch.
 
 QUY TẮC DỊCH:
 1. ĐÂY LÀ HỘI THOẠI NÓI - phải nghe tự nhiên như người thật nói chuyện
