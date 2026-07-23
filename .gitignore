@@ -28,3 +28,7 @@ google_vision_credentials.json
 
 # Test files
 test_paddle_ocr.py
+
+# Cache and results (auto-generated)
+cache/
+static/results/
