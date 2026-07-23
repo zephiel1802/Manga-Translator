@@ -264,8 +264,6 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
             if manga_translator._gemini_translator is None:
                 from translator.gemini_translator import GeminiTranslator
                 api_key = getattr(manga_translator, '_gemini_api_key', None)
-                if not api_key:
-                    raise ValueError("Gemini API key not provided")
                 custom_prompt = getattr(manga_translator, '_gemini_custom_prompt', None)
                 manga_translator._gemini_translator = GeminiTranslator(
                     api_key=api_key, 
@@ -1020,9 +1018,7 @@ def upload_file():
         elif selected_translator == "gemini":
             if not hasattr(manga_translator, '_gemini_translator') or manga_translator._gemini_translator is None:
                 from translator.gemini_translator import GeminiTranslator
-                api_key = gemini_api_key
-                if not api_key:
-                    raise ValueError("Gemini API key required. Please enter it in the web form.")
+                api_key = gemini_api_key or None  # Let GeminiTranslator handle fallback
                 custom_prompt = getattr(manga_translator, '_gemini_custom_prompt', None)
                 manga_translator._gemini_translator = GeminiTranslator(
                     api_key=api_key,
