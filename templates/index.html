@@ -17,7 +17,7 @@
    </header>
    <div class="container">
       <img src="{{ url_for('static', filename='img/logo.png') }}" alt="Manga Translator">
-      <form action="/translate" method="post" enctype="multipart/form-data" onsubmit="return updateHiddenInputs()">
+      <form action="/translate" method="post" enctype="multipart/form-data">
 
          <!-- 2-column grid for dropdowns -->
          <div class="form-grid">
@@ -70,6 +70,7 @@
                   </div>
                   <div class="options">
                      <span class="option">Gemini</span>
+                     <span class="option">FreeLLM</span>
                      <span class="option">Local LLM</span>
                      <span class="option">Google</span>
                      <span class="option">NLLB</span>
@@ -145,6 +146,10 @@
                      <span class="icon">&#9660;</span>
                   </div>
                   <div class="options">
+                     <span class="option">Google-Vision</span>
+                     <span class="option">PaddleOCR</span>
+                     <span class="option">FreeLLM-Vision</span>
+                     <span class="option">Tesseract</span>
                      <span class="option">Chrome-Lens</span>
                      <span class="option">Manga-OCR</span>
                   </div>
@@ -231,6 +236,23 @@
             </div>
          </div>
 
+         <!-- FreeLLM Settings (show when FreeLLM selected) -->
+         <div id="freellm-settings" style="display: none; width: 100%;">
+            <div class="form-grid">
+               <div class="select-wrapper">
+                  <label class="translator-label">FreeLLM API Key</label>
+                  <input type="password" id="freellm_api_key" name="freellm_api_key"
+                     placeholder="freellmapi-..."
+                     style="width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px;">
+               </div>
+               <div class="select-wrapper">
+                  <label class="translator-label">Base URL</label>
+                  <input type="text" id="freellm_base_url" name="freellm_base_url" value="http://127.0.0.1:31415/v1"
+                     placeholder="http://127.0.0.1:31415/v1" class="text-input">
+               </div>
+            </div>
+         </div>
+
          <!-- File upload -->
          <input id="file-upload" type="file" name="files" accept=".jpg, .jpeg, .png" multiple required>
          <label for="file-upload" class="file" id="file-label">
@@ -248,6 +270,9 @@
          <button type="button" id="extract-text-btn" style="margin-top: 8px; background: #444;">
             📝 Extract Text Only (.txt)
          </button>
+          <button type="button" id="clear-cache-btn" onclick="clearCache()" 
+             style="background: #e74c3c; margin-top: 8px; font-size: 13px; padding: 8px 16px; border: none; border-radius: 8px; color: white; cursor: pointer; width: 100%; opacity: 0.8;"
+             title="Xóa toàn bộ cache OCR + translation">🗑️ Xóa cache dịch</button>
       </form>
 
       <!-- Progress Bar -->
@@ -269,6 +294,24 @@
    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
    <script>
+      // Clear translation cache
+      async function clearCache() {
+         const btn = document.getElementById('clear-cache-btn');
+         btn.textContent = '⏳ Đang xóa...';
+         btn.disabled = true;
+         try {
+            const resp = await fetch('/clear-cache', { method: 'POST' });
+            const data = await resp.json();
+            btn.textContent = data.success ? '✅ ' + data.message : '❌ ' + data.message;
+         } catch (e) {
+            btn.textContent = '❌ Lỗi: ' + e.message;
+         }
+         setTimeout(() => {
+            btn.textContent = '🗑️ Xóa cache dịch';
+            btn.disabled = false;
+         }, 3000);
+      }
+      
       // Real-time progress updates
       document.addEventListener('DOMContentLoaded', function () {
          const socket = io();
@@ -278,6 +321,7 @@
          const progressPhase = document.getElementById('progress-phase');
 
          const phaseNames = {
+            'cache': '📦 Kiểm tra cache',
             'detection': '🔍 Phát hiện bubbles',
             'ocr': '📖 OCR nhận dạng text',
             'translation': '🌐 Dịch văn bản',
@@ -362,12 +406,45 @@
          }
 
          // Show progress when form submitted
-         document.querySelector('form').addEventListener('submit', function () {
+         document.querySelector('form').addEventListener('submit', function (e) {
+            e.preventDefault();
+            
+            if (!updateHiddenInputs()) {
+               return;
+            }
+
             progressContainer.style.display = 'block';
             progressBar.style.width = '0%';
             progressBar.style.background = 'linear-gradient(90deg, #5E1675, #8e44ad)';
             progressText.textContent = 'Khởi tạo...';
             progressPhase.textContent = '⏳ Chuẩn bị';
+
+            const formData = new FormData(this);
+            fetch('/translate', {
+               method: 'POST',
+               body: formData
+            })
+            .then(response => {
+               if (response.redirected) {
+                  window.location.href = response.url;
+                  return null;
+               }
+               return response.text();
+            })
+            .then(html => {
+               if (html) {
+                  document.open();
+                  document.write(html);
+                  document.close();
+               }
+            })
+            .catch(err => {
+               alert("Lỗi: " + err);
+               document.getElementById('loading-img').style.display = 'none';
+               document.getElementById('loading-p').style.display = 'none';
+               document.querySelector('form').style.display = 'block';
+               progressContainer.style.display = 'none';
+            });
          });
       });
    </script>

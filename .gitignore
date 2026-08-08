@@ -20,3 +20,15 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Google Cloud credentials (NEVER commit these!)
+google_vision_credentials.json
+*-credentials.json
+*.json.bak
+
+# Test files
+test_paddle_ocr.py
+
+# Cache and results (auto-generated)
+cache/
+static/results/
