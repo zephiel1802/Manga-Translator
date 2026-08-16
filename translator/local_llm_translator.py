@@ -49,7 +49,7 @@ class LocalLLMTranslator(BaseTranslator):
         "claude-haiku-4.5",
         # Gemini
         "gemini-3-pro-preview",
-        "gemini-2.5-pro",
+        "gemini-pro-latest",
         # Other
         "grok-code-fast-1",
     ]

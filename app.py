@@ -35,6 +35,18 @@ try:
 except Exception as e:
     PCLEANER_AVAILABLE = False
     print(f"PanelCleanerZ not available, using fallback: {e}")
+
+# Real-ESRGAN upscaler
+try:
+    from upscaler import get_manga_upscaler, MangaUpscaler
+    UPSCALER_AVAILABLE = MangaUpscaler.is_available()
+    if UPSCALER_AVAILABLE:
+        print("Real-ESRGAN upscaler available")
+    else:
+        print("Real-ESRGAN not installed (pip install realesrgan) - upscale disabled")
+except ImportError:
+    UPSCALER_AVAILABLE = False
+    print("Upscaler module not available")
     
 try:
     from lama_inpainter import get_lama_inpainter, LAMA_AVAILABLE
@@ -50,6 +62,14 @@ except ImportError:
     
 from translator.context_memory import ContextMemory
 from add_text import add_text
+
+# Gemini Banana Pipeline (optional, for Gemini Full / Hybrid modes)
+try:
+    from gemini_pipeline import GeminiMangaPipeline
+    GEMINI_PIPELINE_AVAILABLE = True
+except ImportError as _gp_err:
+    GEMINI_PIPELINE_AVAILABLE = False
+    print(f"Gemini Pipeline not available: {_gp_err}")
 from manga_ocr import MangaOcr
 from ocr.chrome_lens_ocr import ChromeLensOCR
 from PIL import Image
@@ -172,19 +192,19 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
                 is_dark = 0
             yolo_boxes.append({"coords": (int(x1), int(y1), int(x2), int(y2)), "is_dark": is_dark})
 
-    # Hybrid Logic for Chrome-Lens
-    from ocr.chrome_lens_ocr import ChromeLensOCR
-    if isinstance(mocr, ChromeLensOCR):
-        print("Using Hybrid Detection: YOLO + Chrome Lens blocks")
-        lens_blocks = mocr.detect_and_recognize_blocks(image)
+    # Hybrid Logic for Full-Page OCR
+    if hasattr(mocr, 'detect_and_recognize_blocks'):
+        print("Using Hybrid Detection: YOLO + Full-Page OCR blocks")
+        full_blocks = mocr.detect_and_recognize_blocks(image)
         
-        # Match Lens Blocks to YOLO Boxes
+        # Match Full-Page Blocks to YOLO Boxes
         for box in yolo_boxes:
             bx1, by1, bx2, by2 = box["coords"]
             box_texts = []
+            box_trans = []
             
-            # Find intersecting Lens blocks
-            for block in list(lens_blocks):
+            # Find intersecting Full-Page blocks
+            for block in list(full_blocks):
                 lx1, ly1, lx2, ly2 = block["coords"]
                 
                 # Intersection checking
@@ -194,18 +214,23 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
                 iy2 = min(by2, ly2)
                 
                 if ix1 < ix2 and iy1 < iy2:
-                    box_texts.append(block["text"])
-                    lens_blocks.remove(block) # Remove so it's not processed again
+                    box_texts.append(block.get("text", ""))
+                    if block.get("translated_text"):
+                        box_trans.append(block["translated_text"])
+                    full_blocks.remove(block) # Remove so it's not processed again
             
             if box_texts:
-                box["text"] = " ".join(box_texts)
+                box["text"] = " ".join([t for t in box_texts if t])
+            if box_trans:
+                box["translated_text"] = " ".join([t for t in box_trans if t])
         
-        # Any remaining lens_blocks are "outside bubbles"
-        for block in lens_blocks:
+        # Any remaining full_blocks are "outside bubbles"
+        for block in full_blocks:
             yolo_boxes.append({
                 "coords": block["coords"],
                 "is_dark": 0,
-                "text": block["text"],
+                "text": block.get("text", ""),
+                "translated_text": block.get("translated_text", ""),
                 "is_outside": True
             })
 
@@ -270,7 +295,8 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
             'coords': (x1, y1, x2, y2),
             'is_dark': bubble_is_dark,
             'fill_color': detected_color,
-            'requires_stroke': requires_stroke
+            'requires_stroke': requires_stroke,
+            'pre_translated': box.get('translated_text')
         })
         texts_to_translate.append(text)
     
@@ -360,6 +386,8 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     # Determine correct font path based on font name
     font_path = get_font_path(selected_font)
     for data, translated_text in zip(bubble_data, translated_texts):
+        if data.get('pre_translated'):
+            translated_text = data['pre_translated']
         # Use white text for dark bubbles, black text for light bubbles
         text_color = (255, 255, 255) if data.get('is_dark', False) else (0, 0, 0)
         add_text(
@@ -483,14 +511,44 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             # NOTE: Do NOT replace image here - OCR needs the original text!
             # cleaned_image will be stored and applied in Phase 4 before rendering.
             
-            # --- OUTSIDE-BUBBLE TEXT DETECTION (disabled for now) ---
-            # For Japanese manga with lots of outside-bubble text (SFX, narration),
-            # re-enable this block to use Chrome Lens detect_and_recognize_blocks
-            # to find text not covered by CTD regions.
-            # Currently disabled because calling Chrome Lens twice (full page + per-bubble)
-            # causes rate limiting and inconsistent OCR results.
-            # TODO: Re-enable with smarter rate limiting or use a separate OCR engine
-            # for outside-bubble detection.
+            # --- OUTSIDE-BUBBLE TEXT DETECTION (Full-Page OCR) ---
+            if hasattr(mocr, 'detect_and_recognize_blocks'):
+                print("Using Full-Page OCR blocks in PanelCleanerZ pipeline")
+                full_blocks = mocr.detect_and_recognize_blocks(image)
+                
+                # Match Full-Page Blocks to CTD Blocks
+                for box in ctd_blocks:
+                    bx1, by1, bx2, by2 = box["coords"]
+                    box_texts = []
+                    box_trans = []
+                    
+                    for block in list(full_blocks):
+                        lx1, ly1, lx2, ly2 = block["coords"]
+                        ix1 = max(bx1, lx1)
+                        iy1 = max(by1, ly1)
+                        ix2 = min(bx2, lx2)
+                        iy2 = min(by2, ly2)
+                        
+                        if ix1 < ix2 and iy1 < iy2:
+                            box_texts.append(block.get("text", ""))
+                            if block.get("translated_text"):
+                                box_trans.append(block["translated_text"])
+                            full_blocks.remove(block)
+                            
+                    if box_texts:
+                        box["pre_ocr_text"] = " ".join([t for t in box_texts if t])
+                    if box_trans:
+                        box["translated_text"] = " ".join([t for t in box_trans if t])
+                        
+                # Add remaining full_blocks as new outside bubbles
+                for block in full_blocks:
+                    ctd_blocks.append({
+                        "coords": block["coords"],
+                        "pre_ocr_text": block.get("text", ""),
+                        "translated_text": block.get("translated_text", ""),
+                        "from_lens": True,
+                        "bg_color": (255, 255, 255)
+                    })
             # --------------------------------------
             
             print(f" - CTD found {len(ctd_blocks)} text blocks", end="", flush=True)
@@ -518,7 +576,8 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                         'coords': (x1, y1, x2, y2),
                         'is_dark': False,
                         'fill_color': (255, 255, 255),
-                        'requires_stroke': True
+                        'requires_stroke': True,
+                        'pre_translated': blk.get('translated_text')
                     })
                     continue
                 
@@ -556,7 +615,8 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                     'coords': (x1, y1, x2, y2),
                     'is_dark': bubble_is_dark,
                     'fill_color': detected_color,
-                    'requires_stroke': requires_stroke
+                    'requires_stroke': requires_stroke,
+                    'pre_translated': blk.get('translated_text')
                 })
             
             print(f" ✓")
@@ -573,29 +633,34 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                         is_dark = 0
                     yolo_boxes.append({"coords": (int(x1), int(y1), int(x2), int(y2)), "is_dark": is_dark})
                     
-            # Hybrid Logic for Chrome-Lens
-            from ocr.chrome_lens_ocr import ChromeLensOCR
-            if isinstance(mocr, ChromeLensOCR):
-                lens_blocks = mocr.detect_and_recognize_blocks(image)
+            # Hybrid Logic for Full-Page OCR
+            if hasattr(mocr, 'detect_and_recognize_blocks'):
+                full_blocks = mocr.detect_and_recognize_blocks(image)
                 for box in yolo_boxes:
                     bx1, by1, bx2, by2 = box["coords"]
                     box_texts = []
-                    for block in list(lens_blocks):
+                    box_trans = []
+                    for block in list(full_blocks):
                         lx1, ly1, lx2, ly2 = block["coords"]
                         ix1 = max(bx1, lx1)
                         iy1 = max(by1, ly1)
                         ix2 = min(bx2, lx2)
                         iy2 = min(by2, ly2)
                         if ix1 < ix2 and iy1 < iy2:
-                            box_texts.append(block["text"])
-                            lens_blocks.remove(block)
+                            box_texts.append(block.get("text", ""))
+                            if block.get("translated_text"):
+                                box_trans.append(block["translated_text"])
+                            full_blocks.remove(block)
                     if box_texts:
-                        box["text"] = " ".join(box_texts)
-                for block in lens_blocks:
+                        box["text"] = " ".join([t for t in box_texts if t])
+                    if box_trans:
+                        box["translated_text"] = " ".join([t for t in box_trans if t])
+                for block in full_blocks:
                     yolo_boxes.append({
                         "coords": block["coords"],
                         "is_dark": 0,
-                        "text": block["text"],
+                        "text": block.get("text", ""),
+                        "translated_text": block.get("translated_text", ""),
                         "is_outside": True
                     })
 
@@ -637,7 +702,8 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                         'coords': (x1, y1, x2, y2),
                         'is_dark': bubble_is_dark,
                         'fill_color': detected_color,
-                        'requires_stroke': requires_stroke
+                        'requires_stroke': requires_stroke,
+                        'pre_translated': box.get('translated_text')
                     })
                 else:
                     all_bubble_images.append(Image.fromarray(detected_image.copy()))
@@ -650,7 +716,8 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                         'coords': (x1, y1, x2, y2),
                         'is_dark': bubble_is_dark,
                         'fill_color': detected_color,
-                        'requires_stroke': False
+                        'requires_stroke': False,
+                        'pre_translated': box.get('translated_text')
                     })
         
         all_pages_data[name] = {
@@ -837,6 +904,8 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         
         # Apply text to bubbles on the CLEANED image
         for bubble, text in zip(bubbles, translated_texts):
+            if bubble.get('pre_translated'):
+                text = bubble['pre_translated']
             x1, y1, x2, y2 = bubble['coords']
             # Get the region in the original image (this is a view, modifications affect original)
             bubble_region = image[y1:y2, x1:x2]
@@ -905,6 +974,9 @@ def upload_file():
     # Get split long images setting (checkbox - "on" if checked, None if not)
     split_long_images = request.form.get("split_long_images") == "on"
 
+    # Get upscale setting (checkbox - "on" if checked, None if not)
+    upscale_image = request.form.get("upscale_image") == "on"
+
     # Get font selection
     selected_font_raw = request.form["selected_font"]
     selected_font = selected_font_raw.lower()
@@ -966,6 +1038,21 @@ def upload_file():
     if custom_prompt:
         style = custom_prompt  # Override style with custom prompt
 
+    # Get pipeline mode (Classic / Gemini Full / Gemini Hybrid)
+    pipeline_mode_raw = request.form.get("selected_pipeline_mode", "Classic").lower()
+    if "full" in pipeline_mode_raw or "banana" in pipeline_mode_raw:
+        pipeline_mode = "gemini_full"
+    elif "hybrid" in pipeline_mode_raw:
+        pipeline_mode = "gemini_hybrid"
+    else:
+        pipeline_mode = "classic"
+    
+    # Get concurrent workers setting for Gemini pipeline
+    gemini_workers = int(request.form.get("gemini_workers", "3"))
+    gemini_workers = max(1, min(5, gemini_workers))  # Clamp 1-5
+    
+    print(f"Pipeline mode: {pipeline_mode} | Workers: {gemini_workers}")
+
     # Get multiple files
     files = request.files.getlist("files")
     
@@ -1023,6 +1110,15 @@ def upload_file():
             )
         mocr = _OCR_CACHE["freellm_vision"]
         mocr.ocr_language = source_lang
+    elif selected_ocr == "gemini-vision":
+        if _OCR_CACHE.get("gemini_vision") is None:
+            from ocr.gemini_vision_ocr import GeminiVisionOCR
+            _OCR_CACHE["gemini_vision"] = GeminiVisionOCR(
+                api_key=gemini_api_key or os.environ.get("GEMINI_API_KEY"),
+                ocr_language=source_lang
+            )
+        mocr = _OCR_CACHE["gemini_vision"]
+        mocr.ocr_language = source_lang
     elif selected_ocr == "tesseract":
         if _OCR_CACHE.get("tesseract") is None:
             from ocr.tesseract_ocr import TesseractOCR
@@ -1059,8 +1155,531 @@ def upload_file():
     processed_images = []
     auto_font_determined = False  # Flag to analyze font only once
     
+    # ====================================================================
+    # GEMINI PIPELINE MODE (Full / Hybrid) - New Banana Pipeline
+    # ====================================================================
+    if pipeline_mode in ["gemini_full", "gemini_hybrid"] and GEMINI_PIPELINE_AVAILABLE:
+        strategy = "full" if pipeline_mode == "gemini_full" else "hybrid"
+        print(f"\n{'='*50}")
+        print(f"🍌 GEMINI BANANA PIPELINE ({strategy.upper()})")
+        print(f"{'='*50}")
+        
+        # Initialize Gemini Pipeline
+        try:
+            pipeline = GeminiMangaPipeline(
+                api_key=gemini_api_key or None,
+                strategy=strategy,
+                max_workers=gemini_workers,
+                temperature=0.1
+            )
+        except Exception as e:
+            print(f"⚠️ Gemini Pipeline init failed: {e}")
+            print("Falling back to Classic pipeline...")
+            pipeline_mode = "classic"  # Fallback
+        
+        if pipeline_mode != "classic":  # If not fallen back
+            # Read all images
+            all_images = []
+            for file in files:
+                if file and file.filename:
+                    try:
+                        file_stream = file.stream
+                        file_bytes = np.frombuffer(file_stream.read(), dtype=np.uint8)
+                        image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                        if image is not None:
+                            name = os.path.splitext(file.filename)[0]
+                            all_images.append({'image': image, 'name': name})
+                    except Exception as e:
+                        print(f"Error reading {file.filename}: {e}")
+            
+            if not all_images:
+                return redirect("/")
+            
+            total = len(all_images)
+            
+            def emit_gemini_progress(current, total_count, message):
+                """Emit progress for Gemini pipeline."""
+                try:
+                    socketio.emit('progress', {
+                        'phase': 'gemini',
+                        'current': current,
+                        'total': total_count,
+                        'message': message,
+                        'percent': int((current / max(total_count, 1)) * 100)
+                    })
+                except Exception:
+                    pass
+            
+            emit_gemini_progress(0, total, f'🍌 Bắt đầu Gemini Pipeline ({strategy})...')
+            
+            if strategy == "full":
+                # Strategy A: Gemini does EVERYTHING (OCR + Inpaint + Translate + Typeset)
+                print(f"Processing {total} pages with Gemini Full (Banana 🍌)...")
+                
+                # Process batch with concurrent workers
+                image_arrays = [img['image'] for img in all_images]
+                results = pipeline.process_batch(
+                    image_arrays, source_lang, target_lang,
+                    progress_callback=emit_gemini_progress
+                )
+                
+                # Save results to disk
+                session_id = uuid.uuid4().hex[:12]
+                session_dir = os.path.join(RESULTS_DIR, session_id)
+                os.makedirs(session_dir, exist_ok=True)
+                cleanup_old_results()
+                
+                for i, (result_img, img_data) in enumerate(zip(results, all_images)):
+                    try:
+                        if result_img is None:
+                            result_img = img_data['image']  # Fallback to original
+                        
+                        base_name = img_data['name']
+                        
+                        # Split long images if enabled
+                        if split_long_images:
+                            chunks = split_long_image(result_img)
+                        else:
+                            chunks = [result_img]
+                        
+                        for j, chunk in enumerate(chunks):
+                            chunk_name = f"{base_name}_part{j+1}" if len(chunks) > 1 else base_name
+                            filename = f"{chunk_name}.jpg"
+                            filepath = os.path.join(session_dir, filename)
+                            cv2.imwrite(filepath, chunk, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                            processed_images.append({
+                                "name": chunk_name,
+                                "url": f"/static/results/{session_id}/{filename}"
+                            })
+                    except Exception as e:
+                        print(f"Error saving result {i}: {e}")
+                
+                emit_gemini_progress(total, total, f'✅ Hoàn tất! {total} trang')
+            
+            else:
+                # Strategy B: Hybrid
+                # PanelCleanerZ: accurate text detection + inpainting
+                # Gemini: high-quality context-aware translation
+                print(f"Processing {total} pages with Gemini Hybrid...")
+                
+                font_path = get_font_path(selected_font)
+                session_id = uuid.uuid4().hex[:12]
+                session_dir = os.path.join(RESULTS_DIR, session_id)
+                os.makedirs(session_dir, exist_ok=True)
+                cleanup_old_results()
+                
+                for i, img_data in enumerate(all_images):
+                    try:
+                        image = img_data['image'].copy()
+                        original = img_data['image'].copy()  # Keep original for OCR
+                        base_name = img_data['name']
+                        
+                        # --- Optional: Upscale blurry images ---
+                        print(f"  [DEBUG] upscale_image={upscale_image}, UPSCALER_AVAILABLE={UPSCALER_AVAILABLE}")
+                        if upscale_image and UPSCALER_AVAILABLE:
+                            emit_gemini_progress(i, total, f'Trang {i+1}/{total}: Upscale...')
+                            try:
+                                upscaler = get_manga_upscaler(scale=4)
+                                image = upscaler.upscale(image)
+                                original = upscaler.upscale(original)
+                                print(f"  ✓ Upscaled to {image.shape[1]}x{image.shape[0]}")
+                            except Exception as e:
+                                print(f"  ⚠️ Upscale failed: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        
+                        img_h, img_w = image.shape[:2]
+                        
+                        emit_gemini_progress(i, total, f'Trang {i+1}/{total}: Phân tích...')
+                        
+                        # --- Phase 1: PanelCleanerZ detect + clean ---
+                        detected_blocks = []
+                        pcleaner_cleaned = False
+                        
+                        if PCLEANER_AVAILABLE:
+                            try:
+                                result = _pcleaner.detect_and_clean(image)
+                                image = result['cleaned_image']
+                                detected_blocks = result.get('text_blocks', [])
+                                pcleaner_cleaned = True
+                                print(f"\n  Page {i+1}: PanelCleanerZ found {len(detected_blocks)} text regions")
+                                for j, blk in enumerate(detected_blocks):
+                                    x1, y1, x2, y2 = blk['coords']
+                                    vert = '↕' if blk.get('vertical') else '↔'
+                                    lang = blk.get('language', '?')
+                                    print(f"    [{j+1}] {vert} {lang} ({x1},{y1})-({x2},{y2}) {x2-x1}x{y2-y1}")
+                            except Exception as e:
+                                print(f"  ⚠️ PanelCleanerZ failed: {e}")
+                        
+                        if not detected_blocks:
+                            # Fallback: use Gemini analysis if PanelCleanerZ unavailable
+                            print(f"  Fallback: using Gemini for detection...")
+                            analysis = pipeline.analyze_page(original, source_lang, target_lang)
+                            if analysis:
+                                # Convert Gemini format to PanelCleanerZ format + render directly
+                                for block in analysis:
+                                    coords = block.get('coords', [])
+                                    if len(coords) == 4:
+                                        x1, y1, x2, y2 = [int(c) for c in coords]
+                                        text = block.get('translated_text', '').strip()
+                                        if text and x2 > x1 and y2 > y1:
+                                            x1, y1 = max(0, x1), max(0, y1)
+                                            x2, y2 = min(img_w, x2), min(img_h, y2)
+                                            region = image[y1:y2, x1:x2]
+                                            avg = np.mean(region)
+                                            fill_color = (255,255,255) if avg > 128 else (0,0,0)
+                                            text_color = (0,0,0) if avg > 128 else (255,255,255)
+                                            cv2.rectangle(image, (x1,y1), (x2,y2), fill_color, -1)
+                                            region = image[y1:y2, x1:x2]
+                                            cont = np.array([[[0,0]], [[0,y2-y1]], [[x2-x1,y2-y1]], [[x2-x1,0]]], dtype=np.int32)
+                                            add_text(image=region, text=text, font_path=font_path, 
+                                                    bubble_contour=cont, text_color=text_color,
+                                                    is_dark_bubble=(avg < 128), requires_stroke=True)
+                                print(f"  Gemini fallback rendered {len(analysis)} blocks")
+                            
+                        elif detected_blocks:
+                            # --- Phase 2: Gemini batch translate ---
+                            emit_gemini_progress(i, total, f'Trang {i+1}/{total}: Dịch thuật...')
+                            
+                            source_name = {'ja': 'Japanese', 'zh': 'Chinese', 'ko': 'Korean', 'en': 'English'}.get(source_lang, source_lang)
+                            target_name = {'vi': 'Vietnamese', 'en': 'English'}.get(target_lang, target_lang)
+                            
+                            # Draw numbered boxes on image copy so Gemini can identify regions
+                            annotated = original.copy()
+                            for j, blk in enumerate(detected_blocks):
+                                x1, y1, x2, y2 = blk['coords']
+                                color = (0, 0, 255)  # Red in BGR
+                                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                                label = str(j + 1)
+                                cv2.putText(annotated, label, (x1, y1 - 5), 
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                            
+                            # --- Phase 2a: Two-pass OCR for complex vertical regions ---
+                            # For wide vertical regions (multi-column), crop and OCR individually
+                            # to get accurate text before batch translation
+                            import time
+                            pre_ocr_texts = {}  # region_id -> ocr'd text
+                            COMPLEX_WIDTH_THRESHOLD = 300  # pixels at 4x - roughly 3+ columns
+                            
+                            complex_regions = []
+                            for j, blk in enumerate(detected_blocks):
+                                x1, y1, x2, y2 = blk['coords']
+                                is_vert = blk.get('vertical', False)
+                                bw = x2 - x1
+                                if is_vert and bw > COMPLEX_WIDTH_THRESHOLD:
+                                    complex_regions.append((j, blk))
+                            
+                            if complex_regions:
+                                from google.genai import types as ocr_types
+                                print(f"  🔍 Pre-OCR: {len(complex_regions)} complex vertical regions")
+                                
+                                for idx, (j, blk) in enumerate(complex_regions):
+                                    x1, y1, x2, y2 = blk['coords']
+                                    cx1, cy1 = max(0, x1), max(0, y1)
+                                    cx2, cy2 = min(img_w, x2), min(img_h, y2)
+                                    crop = original[cy1:cy2, cx1:cx2]
+                                    pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                                    
+                                    ocr_prompt = f"""Read ALL the {source_name} text in this image. 
+The text is written VERTICALLY in columns. Read columns from RIGHT to LEFT, each column from TOP to BOTTOM.
+
+IMPORTANT: Read each column COMPLETELY before moving to the next column to the left.
+
+Return ONLY the raw text, nothing else. No translation, no explanation."""
+                                    
+                                    # Retry with exponential backoff for rate limits
+                                    for ocr_attempt in range(3):
+                                        try:
+                                            ocr_response = pipeline.client.models.generate_content(
+                                                model="gemini-2.5-pro",
+                                                contents=[pil_crop, ocr_prompt],
+                                                config=ocr_types.GenerateContentConfig(
+                                                    temperature=0.1
+                                                )
+                                            )
+                                            ocr_text = ocr_response.text.strip()
+                                            if ocr_text:
+                                                pre_ocr_texts[j + 1] = ocr_text
+                                                print(f"    Region {j+1}: OCR → {ocr_text[:60]}...")
+                                            break
+                                        except Exception as ocr_e:
+                                            err_str = str(ocr_e)
+                                            if '429' in err_str and ocr_attempt < 2:
+                                                wait = (ocr_attempt + 1) * 15
+                                                print(f"    Region {j+1}: Rate limited, waiting {wait}s...")
+                                                time.sleep(wait)
+                                            else:
+                                                print(f"    Region {j+1}: OCR failed → {ocr_e}")
+                                                break
+                                    
+                                    # Delay between requests to avoid rate limits
+                                    if idx < len(complex_regions) - 1:
+                                        time.sleep(3)
+                            
+                            # Build per-region direction hints
+                            region_hints = []
+                            for j, blk in enumerate(detected_blocks):
+                                x1, y1, x2, y2 = blk['coords']
+                                is_vert = blk.get('vertical', False)
+                                lang = blk.get('language', 'unknown')
+                                direction = "VERTICAL (read top→bottom, columns right→left)" if is_vert else "HORIZONTAL (left→right)"
+                                region_hints.append(f"  Region {j+1}: ({x1},{y1})-({x2},{y2}) {direction} [{lang}]")
+                            region_hints_str = "\n".join(region_hints)
+                            
+                            # Build pre-OCR section if we have any
+                            pre_ocr_section = ""
+                            if pre_ocr_texts:
+                                pre_ocr_lines = []
+                                for rid, text in sorted(pre_ocr_texts.items()):
+                                    pre_ocr_lines.append(f"  Region {rid}: {text}")
+                                pre_ocr_section = f"""
+
+=== PRE-OCR'D TEXT (USE THIS AS GROUND TRUTH) ===
+The following regions have been pre-OCR'd with high accuracy. Use this text as the source for translation.
+Do NOT re-read these regions from the image. Trust the pre-OCR'd text below:
+{chr(10).join(pre_ocr_lines)}
+=== END PRE-OCR'D TEXT ==="""
+                            
+                            translate_prompt = f"""This manga page has {len(detected_blocks)} text regions marked with red numbered rectangles.
+
+For each numbered region (1 to {len(detected_blocks)}), read the {source_name} text INSIDE that specific red box and translate to {target_name}.
+
+TEXT DIRECTION for each region:
+{region_hints_str}
+{pre_ocr_section}
+
+=== CRITICAL: HOW TO READ VERTICAL CJK TEXT ===
+For regions marked VERTICAL (Chinese/Japanese), text is arranged in COLUMNS running top-to-bottom.
+If a region contains MULTIPLE COLUMNS, you MUST follow these steps:
+
+Step 1: Identify how many vertical columns of text exist in the region.
+Step 2: Start with the RIGHTMOST column. Read ALL characters in that column from TOP to BOTTOM.
+Step 3: Move to the NEXT column to the LEFT. Read ALL its characters from TOP to BOTTOM.
+Step 4: Repeat until all columns are read.
+
+CRITICAL: Read each column COMPLETELY before moving to the next column.
+NEVER interleave or mix characters from different columns!
+
+Example - A region with 3 vertical columns:
+  [Col3] [Col2] [Col1]    ← Col1 is rightmost
+   因      卑      啓
+   為      職      稟
+   這      有      公
+   名      一      公
+   盜      個
+   賊      發
+          現
+
+  ✓ CORRECT reading: 啓稟公公 → 卑職有一個發現 → 因為這名盜賊
+  ✗ WRONG reading:   啓卑因稟職為公有這公一名 (interleaving columns!)
+
+For HORIZONTAL regions: read left to right, top to bottom (normal reading order).
+=== END READING RULES ===
+
+Return a JSON array with {len(detected_blocks)} objects, one per numbered box, in ORDER.
+Each object must have: "region_id" (integer), "original_text" (string), "translated_text" (string).
+
+IMPORTANT: Match each region_id to the number shown on the image. Read the text INSIDE each red box carefully.
+
+Translation rules:
+- Natural spoken {target_name}, NOT textbook style
+- Keep character names unchanged
+- Dialog should sound natural when read aloud
+- OCR text may have errors - use context to auto-correct before translating"""
+
+                            if target_lang == "vi":
+                                translate_prompt += """
+- Use proper Vietnamese pronouns (tao/mày for rough, tôi/anh for polite)
+- Historical terms: Sino-Vietnamese (皇帝→Hoàng đế, 公公→Công Công)
+- SFX: translate naturally"""
+
+                            translate_prompt += "\n\nReturn ONLY the JSON array."
+                            
+                            try:
+                                from google.genai import types
+                                # Send ANNOTATED image (with numbered boxes)
+                                pil_annotated = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+                                
+                                translations = None
+                                for attempt in range(5):
+                                    try:
+                                        response = pipeline.client.models.generate_content(
+                                            model="gemini-2.5-pro",
+                                            contents=[pil_annotated, translate_prompt],
+                                            config=types.GenerateContentConfig(
+                                                temperature=0.1,
+                                                response_mime_type="application/json"
+                                            )
+                                        )
+                                    except Exception as api_e:
+                                        err_str = str(api_e)
+                                        if '429' in err_str and attempt < 4:
+                                            wait = (attempt + 1) * 15
+                                            print(f"  ⚠️ Rate limited (attempt {attempt+1}/5), waiting {wait}s...")
+                                            time.sleep(wait)
+                                            continue
+                                        else:
+                                            raise
+                                    
+                                    try:
+                                        translations = json.loads(response.text)
+                                        break
+                                    except json.JSONDecodeError as je:
+                                        if attempt < 4:
+                                            print(f"  ⚠️ JSON parse error (attempt {attempt+1}/5), retrying...")
+                                        else:
+                                            raise je
+                                
+                                print(f"  ✓ Gemini translated {len(translations)} regions")
+                                
+                                # Map translations to detected blocks
+                                trans_map = {}
+                                for t in translations:
+                                    rid = t.get('region_id', 0)
+                                    orig = t.get('original_text', '')
+                                    trans = t.get('translated_text', '')
+                                    trans_map[rid] = trans
+                                    print(f"    Region {rid}:")
+                                    print(f"      原文: {orig}")
+                                    print(f"      Dịch: {trans}")
+                                
+                            except Exception as e:
+                                print(f"  ⚠️ Gemini translation failed: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                trans_map = {}
+                            
+                            # --- Phase 3: Render translations ---
+                            emit_gemini_progress(i, total, f'Trang {i+1}/{total}: Chèn chữ...')
+                            rendered_count = 0
+                            
+                            # Collect all block coords for overlap checking
+                            all_coords = [blk['coords'] for blk in detected_blocks]
+                            
+                            for j, blk in enumerate(detected_blocks):
+                                try:
+                                    text = trans_map.get(j + 1, '').strip()
+                                    if not text:
+                                        continue
+                                    
+                                    x1, y1, x2, y2 = blk['coords']
+                                    x1, y1 = max(0, x1), max(0, y1)
+                                    x2, y2 = min(img_w, x2), min(img_h, y2)
+                                    bw, bh = x2 - x1, y2 - y1
+                                    
+                                    if bw <= 0 or bh <= 0:
+                                        continue
+                                    
+                                    # --- Expand narrow vertical boxes for horizontal text ---
+                                    is_vert = blk.get('vertical', False)
+                                    min_width = 100  # Minimum width for readable horizontal text
+                                    
+                                    if bw < min_width and bh > bw * 1.5:
+                                        # Need to expand width
+                                        needed = min_width - bw
+                                        # Try expanding both sides equally
+                                        expand_left = needed // 2
+                                        expand_right = needed - expand_left
+                                        
+                                        new_x1 = max(0, x1 - expand_left)
+                                        new_x2 = min(img_w, x2 + expand_right)
+                                        
+                                        # Check overlap with OTHER blocks
+                                        overlap = False
+                                        for k, other_coords in enumerate(all_coords):
+                                            if k == j:
+                                                continue
+                                            ox1, oy1, ox2, oy2 = other_coords
+                                            # Check if expanded box overlaps other block
+                                            if new_x1 < ox2 and new_x2 > ox1 and y1 < oy2 and y2 > oy1:
+                                                overlap = True
+                                                break
+                                        
+                                        if not overlap:
+                                            # Fill expanded area with background
+                                            bg_color = blk.get('bg_color', (255, 255, 255))
+                                            # Fill left expansion
+                                            if new_x1 < x1:
+                                                cv2.rectangle(image, (new_x1, y1), (x1, y2), bg_color, -1)
+                                            # Fill right expansion
+                                            if new_x2 > x2:
+                                                cv2.rectangle(image, (x2, y1), (new_x2, y2), bg_color, -1)
+                                            
+                                            x1, x2 = new_x1, new_x2
+                                            bw = x2 - x1
+                                            print(f"    ↔ Expanded to {bw}x{bh}")
+                                    
+                                    # Use PanelCleanerZ's detected colors
+                                    bg_color = blk.get('bg_color', (255, 255, 255))
+                                    bg_brightness = sum(bg_color) / 3
+                                    is_dark = bg_brightness < 128
+                                    text_color = (255, 255, 255) if is_dark else (0, 0, 0)
+                                    
+                                    # Get cleaned region
+                                    region = image[y1:y2, x1:x2]
+                                    
+                                    # Create contour for add_text
+                                    cont = np.array([
+                                        [[0, 0]], [[0, bh]], [[bw, bh]], [[bw, 0]]
+                                    ], dtype=np.int32)
+                                    
+                                    # Render with stroke for readability
+                                    add_text(
+                                        image=region,
+                                        text=text,
+                                        font_path=font_path,
+                                        bubble_contour=cont,
+                                        text_color=text_color,
+                                        is_dark_bubble=is_dark,
+                                        requires_stroke=True
+                                    )
+                                    
+                                    rendered_count += 1
+                                    vert = '↕' if blk.get('vertical') else '↔'
+                                    print(f"    ✓ [{vert}] ({x1},{y1})-({x2},{y2}) {bw}x{bh}: {text[:35]}...")
+                                    
+                                except Exception as e:
+                                    print(f"    ⚠️ Block {j+1} render error: {e}")
+                            
+                            print(f"  ✓ Rendered {rendered_count}/{len(detected_blocks)} blocks")
+                        
+                        # Save result
+                        if split_long_images:
+                            chunks = split_long_image(image)
+                        else:
+                            chunks = [image]
+                        
+                        for j, chunk in enumerate(chunks):
+                            chunk_name = f"{base_name}_part{j+1}" if len(chunks) > 1 else base_name
+                            filename = f"{chunk_name}.jpg"
+                            filepath = os.path.join(session_dir, filename)
+                            cv2.imwrite(filepath, chunk, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                            processed_images.append({
+                                "name": chunk_name,
+                                "url": f"/static/results/{session_id}/{filename}"
+                            })
+                    except Exception as e:
+                        print(f"Error processing page {i}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                emit_gemini_progress(total, total, f'✅ Hoàn tất! {total} trang')
+            
+            # Skip to rendering template if Gemini pipeline processed
+            if processed_images:
+                return render_template("translate.html", images=processed_images)
+            else:
+                print("⚠️ Gemini pipeline produced no results, falling back to Classic")
+                pipeline_mode = "classic"
+                # Re-read files (streams already consumed)
+                # Note: This fallback won't work because file streams are consumed.
+                # In production, we'd need to buffer the files first.
+    
+    # ====================================================================
+    # CLASSIC PIPELINE (existing 4-phase processing)
+    # ====================================================================
     # For Local LLM, Gemini and FreeLLM: Use multi-page batch processing
-    if selected_translator in ["copilot", "gemini", "freellm"]:
+    if selected_translator in ["copilot", "gemini", "freellm"] and pipeline_mode == "classic":
         # First, read all images into memory
         all_images = []
         for file in files:
@@ -1291,6 +1910,8 @@ def extract_text():
     enable_black_bubble = request.form.get("detect_black_bubbles") == "on"
     filter_sfx = request.form.get("filter_sfx", "on") == "on"
     gemini_api_key = request.form.get("gemini_api_key", "").strip()
+    freellm_api_key = request.form.get("freellm_api_key", "").strip()
+    freellm_base_url = request.form.get("freellm_base_url", "").strip()
 
     source_lang_map = {
         "japanese (manga)": "ja",
@@ -1305,7 +1926,44 @@ def extract_text():
     if not files or files[0].filename == '':
         return redirect("/")
 
-    if selected_ocr == "chrome-lens":
+    if selected_ocr == "paddleocr":
+        if _OCR_CACHE.get("paddleocr") is None:
+            from ocr.paddle_ocr import PaddleOcrEngine
+            _OCR_CACHE["paddleocr"] = PaddleOcrEngine(ocr_language=source_lang)
+        mocr = _OCR_CACHE["paddleocr"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "google-vision":
+        if _OCR_CACHE.get("google_vision") is None:
+            from ocr.google_vision_ocr import GoogleVisionOCR
+            _OCR_CACHE["google_vision"] = GoogleVisionOCR(ocr_language=source_lang)
+        mocr = _OCR_CACHE["google_vision"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "freellm-vision":
+        if _OCR_CACHE.get("freellm_vision") is None:
+            from ocr.freellm_vision_ocr import FreeLLMVisionOCR
+            _OCR_CACHE["freellm_vision"] = FreeLLMVisionOCR(
+                api_key=freellm_api_key or os.environ.get("FREELLM_API_KEY"),
+                base_url=freellm_base_url or os.environ.get("FREELLM_BASE_URL"),
+                ocr_language=source_lang,
+            )
+        mocr = _OCR_CACHE["freellm_vision"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "tesseract":
+        if _OCR_CACHE.get("tesseract") is None:
+            from ocr.tesseract_ocr import TesseractOCR
+            _OCR_CACHE["tesseract"] = TesseractOCR(ocr_language=source_lang)
+        mocr = _OCR_CACHE["tesseract"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "gemini-vision":
+        if _OCR_CACHE.get("gemini_vision") is None:
+            from ocr.gemini_vision_ocr import GeminiVisionOCR
+            _OCR_CACHE["gemini_vision"] = GeminiVisionOCR(
+                api_key=gemini_api_key or os.environ.get("GEMINI_API_KEY"),
+                ocr_language=source_lang
+            )
+        mocr = _OCR_CACHE["gemini_vision"]
+        mocr.ocr_language = source_lang
+    elif selected_ocr == "chrome-lens":
         if _OCR_CACHE["chrome_lens"] is None:
             import asyncio as _asyncio
             try:
@@ -1321,7 +1979,7 @@ def extract_text():
         mocr = _OCR_CACHE["manga_ocr"]
 
     use_batch_ocr = hasattr(mocr, 'process_batch')
-    use_full_page_ocr = selected_ocr == "chrome-lens"
+    use_full_page_ocr = hasattr(mocr, 'get_text_blocks') or hasattr(mocr, 'detect_and_recognize_blocks')
 
     def _flatten(t):
         return " ".join((t or "").split())
@@ -1404,7 +2062,7 @@ def extract_text():
         try:
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-2.5-flash-lite")
+            model = genai.GenerativeModel("gemini-flash-latest")
             # Build a compact payload
             payload_lines = []
             for i, p in enumerate(pages_in, start=1):

@@ -75,6 +75,7 @@ PACKAGES=(
     "pytesseract:pytesseract"
     "paddleocr:paddleocr"
     "gunicorn:gunicorn"
+    "simple_lama_inpainting:simple-lama-inpainting"
     # PanelCleanerZ dependencies (used by pcleaner_bridge.py)
     "pyclipper:pyclipper"
     "shapely:shapely"
@@ -128,6 +129,56 @@ fi
 # (uses --quiet to reduce noise, only installs what's missing)
 echo "[INFO] Syncing with requirements.txt..."
 pip install -q -r requirements.txt 2>/dev/null
+
+# =============================================================
+# Real-ESRGAN NCNN Binary (for image upscaling)
+# =============================================================
+NCNN_BIN="$SCRIPT_DIR/bin/realesrgan-ncnn-vulkan"
+if [ ! -x "$NCNN_BIN" ]; then
+    echo ""
+    echo "[INFO] realesrgan-ncnn-vulkan not found. Downloading..."
+
+    NCNN_VERSION="20220424"
+    NCNN_TAG="v0.2.5.0"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        NCNN_PLATFORM="macos"
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        NCNN_PLATFORM="ubuntu"
+    else
+        echo "[WARNING] Unsupported platform for NCNN binary: $OSTYPE"
+        echo "[WARNING] Upscale feature will not be available."
+        NCNN_PLATFORM=""
+    fi
+
+    if [ -n "$NCNN_PLATFORM" ]; then
+        NCNN_URL="https://github.com/xinntao/Real-ESRGAN/releases/download/${NCNN_TAG}/realesrgan-ncnn-vulkan-${NCNN_VERSION}-${NCNN_PLATFORM}.zip"
+        NCNN_ZIP="$SCRIPT_DIR/bin/realesrgan-ncnn-vulkan.zip"
+
+        mkdir -p "$SCRIPT_DIR/bin"
+        echo "[INFO] Downloading from: $NCNN_URL"
+
+        if curl -fSL -o "$NCNN_ZIP" "$NCNN_URL" 2>/dev/null || wget -q -O "$NCNN_ZIP" "$NCNN_URL" 2>/dev/null; then
+            echo "[INFO] Extracting..."
+            unzip -q -o "$NCNN_ZIP" -d "$SCRIPT_DIR/bin/"
+            rm -f "$NCNN_ZIP"
+
+            # Find and make executable
+            FOUND_BIN=$(find "$SCRIPT_DIR/bin" -name "realesrgan-ncnn-vulkan" -type f 2>/dev/null | head -1)
+            if [ -n "$FOUND_BIN" ]; then
+                chmod +x "$FOUND_BIN"
+                echo "[OK] realesrgan-ncnn-vulkan ready: $FOUND_BIN"
+            else
+                echo "[WARNING] Binary not found after extraction."
+            fi
+        else
+            echo "[WARNING] Download failed. Upscale feature will not be available."
+            rm -f "$NCNN_ZIP"
+        fi
+    fi
+else
+    echo "[OK] realesrgan-ncnn-vulkan is ready."
+fi
 
 echo ""
 echo "[INFO] Starting Manga Translator..."

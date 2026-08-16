@@ -51,7 +51,7 @@ class GeminiTranslator(BaseTranslator):
         super().__init__(custom_prompt=custom_prompt, style=style)
         
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.model = "gemini-2.5-flash-lite"
+        self.model = "gemini-flash-latest"
         
         if self.api_key:
             # Auth method 1: API key (Google AI Studio)

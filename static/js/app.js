@@ -39,28 +39,42 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                 }
 
-                // Show/hide translator-specific settings
-                if (selectBox.id === 'translator') {
+                // Show/hide settings based on translator and OCR selections
+                if (selectBox.id === 'translator' || selectBox.id === 'ocr') {
+                    const translatorText = document.querySelector('#translator .selected').textContent;
+                    const ocrText = document.querySelector('#ocr .selected').textContent;
+                    
                     const copilotSettings = document.getElementById('copilot-settings');
                     const geminiSettings = document.getElementById('gemini-settings');
                     const freellmSettings = document.getElementById('freellm-settings');
 
-                    if (option.textContent === 'Local LLM') {
-                        copilotSettings.style.display = 'block';
-                        geminiSettings.style.display = 'none';
-                        freellmSettings.style.display = 'none';
-                    } else if (option.textContent === 'Gemini') {
-                        copilotSettings.style.display = 'none';
-                        geminiSettings.style.display = 'block';
-                        freellmSettings.style.display = 'none';
-                    } else if (option.textContent === 'FreeLLM') {
-                        copilotSettings.style.display = 'none';
-                        geminiSettings.style.display = 'none';
-                        freellmSettings.style.display = 'block';
+                    copilotSettings.style.display = (translatorText === 'Local LLM') ? 'block' : 'none';
+                    geminiSettings.style.display = (translatorText === 'Gemini' || ocrText === 'Gemini-Vision') ? 'block' : 'none';
+                    freellmSettings.style.display = (translatorText === 'FreeLLM' || ocrText === 'FreeLLM-Vision') ? 'block' : 'none';
+                }
+
+                if (selectBox.id === 'pipeline_mode') {
+                    const mode = option.textContent;
+                    const ocrWrapper = document.getElementById('ocr_wrapper');
+                    const fontWrapper = document.getElementById('font_wrapper');
+                    const workersSettings = document.getElementById('gemini-workers-settings');
+                    const workersNote = document.getElementById('gemini-workers-note');
+                    
+                    if (mode.includes('Gemini Full')) {
+                        if (ocrWrapper) ocrWrapper.style.display = 'none';
+                        if (fontWrapper) fontWrapper.style.display = 'none';
+                        if (workersSettings) workersSettings.style.display = 'block';
+                        if (workersNote) workersNote.style.display = 'block';
+                    } else if (mode.includes('Gemini Hybrid')) {
+                        if (ocrWrapper) ocrWrapper.style.display = 'none';
+                        if (fontWrapper) fontWrapper.style.display = 'block';
+                        if (workersSettings) workersSettings.style.display = 'block';
+                        if (workersNote) workersNote.style.display = 'none';
                     } else {
-                        copilotSettings.style.display = 'none';
-                        geminiSettings.style.display = 'none';
-                        freellmSettings.style.display = 'none';
+                        if (ocrWrapper) ocrWrapper.style.display = 'block';
+                        if (fontWrapper) fontWrapper.style.display = 'block';
+                        if (workersSettings) workersSettings.style.display = 'none';
+                        if (workersNote) workersNote.style.display = 'none';
                     }
                 }
             });
@@ -97,33 +111,62 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (selectBox.id === 'style' && savedValue.includes('Custom')) {
                             document.getElementById('custom-prompt-wrapper').style.display = 'block';
                         }
-                        if (selectBox.id === 'translator') {
+                        if (selectBox.id === 'translator' || selectBox.id === 'ocr') {
+                            const translatorText = localStorage.getItem('select_translator') || 'Gemini';
+                            const ocrText = localStorage.getItem('select_ocr') || 'Chrome-Lens';
+                            
                             const copilotSettings = document.getElementById('copilot-settings');
                             const geminiSettings = document.getElementById('gemini-settings');
                             const freellmSettings = document.getElementById('freellm-settings');
-                            if (savedValue === 'Local LLM') {
-                                copilotSettings.style.display = 'block';
-                                geminiSettings.style.display = 'none';
-                                freellmSettings.style.display = 'none';
-                            } else if (savedValue === 'Gemini') {
-                                copilotSettings.style.display = 'none';
-                                geminiSettings.style.display = 'block';
-                                freellmSettings.style.display = 'none';
-                            } else if (savedValue === 'FreeLLM') {
-                                copilotSettings.style.display = 'none';
-                                geminiSettings.style.display = 'none';
-                                freellmSettings.style.display = 'block';
-                            } else {
-                                copilotSettings.style.display = 'none';
-                                geminiSettings.style.display = 'none';
-                                freellmSettings.style.display = 'none';
-                            }
+                            
+                            copilotSettings.style.display = (translatorText === 'Local LLM') ? 'block' : 'none';
+                            geminiSettings.style.display = (translatorText === 'Gemini' || ocrText === 'Gemini-Vision') ? 'block' : 'none';
+                            freellmSettings.style.display = (translatorText === 'FreeLLM' || ocrText === 'FreeLLM-Vision') ? 'block' : 'none';
                         }
                     }
                 });
             }
         }
     });
+
+    // Trigger initial state for pipeline_mode
+    const pipelineModeText = document.querySelector('#pipeline_mode .selected');
+    if (pipelineModeText) {
+        const mode = pipelineModeText.textContent;
+        const ocrWrapper = document.getElementById('ocr_wrapper');
+        const fontWrapper = document.getElementById('font_wrapper');
+        const workersSettings = document.getElementById('gemini-workers-settings');
+        const workersNote = document.getElementById('gemini-workers-note');
+        
+        if (mode.includes('Gemini Full')) {
+            if (ocrWrapper) ocrWrapper.style.display = 'none';
+            if (fontWrapper) fontWrapper.style.display = 'none';
+            if (workersSettings) workersSettings.style.display = 'block';
+            if (workersNote) workersNote.style.display = 'block';
+        } else if (mode.includes('Gemini Hybrid')) {
+            if (ocrWrapper) ocrWrapper.style.display = 'none';
+            if (fontWrapper) fontWrapper.style.display = 'block';
+            if (workersSettings) workersSettings.style.display = 'block';
+            if (workersNote) workersNote.style.display = 'none';
+        } else {
+            if (ocrWrapper) ocrWrapper.style.display = 'block';
+            if (fontWrapper) fontWrapper.style.display = 'block';
+            if (workersSettings) workersSettings.style.display = 'none';
+            if (workersNote) workersNote.style.display = 'none';
+        }
+    }
+
+    // Load saved Gemini Workers from localStorage
+    const geminiWorkersInput = document.getElementById('gemini_workers');
+    if (geminiWorkersInput) {
+        const savedWorkers = localStorage.getItem('gemini_workers');
+        if (savedWorkers) {
+            geminiWorkersInput.value = savedWorkers;
+        }
+        geminiWorkersInput.addEventListener('input', () => {
+            localStorage.setItem('gemini_workers', geminiWorkersInput.value);
+        });
+    }
 
     // Load saved Gemini API key from localStorage
     const geminiKeyInput = document.getElementById('gemini_api_key');
@@ -272,6 +315,7 @@ function updateHiddenInputs() {
         return el ? el.innerText : '';
     };
 
+    document.getElementById("selected_pipeline_mode").value = getSelectedText("pipeline_mode");
     document.getElementById("selected_source_lang").value = getSelectedText("source_lang");
     document.getElementById("selected_language").value = getSelectedText("language");
     document.getElementById("selected_translator").value = getSelectedText("translator");

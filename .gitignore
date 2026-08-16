@@ -29,6 +29,12 @@ google_vision_credentials.json
 # Test files
 test_paddle_ocr.py
 
+# Downloaded binaries (realesrgan-ncnn-vulkan)
+bin/
+
+# Model weights (auto-downloaded)
+model/
+
 # Cache and results (auto-generated)
 cache/
 static/results/

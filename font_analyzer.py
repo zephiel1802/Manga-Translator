@@ -53,7 +53,7 @@ class FontAnalyzer:
             raise ValueError("Gemini API key required. Set GEMINI_API_KEY or pass api_key.")
         
         self.client = genai.Client(api_key=self.api_key)
-        self.model = "gemini-2.5-flash-lite"
+        self.model = "gemini-flash-latest"
     
     def _image_to_pil(self, image) -> Image.Image:
         """Convert various image formats to PIL Image."""
