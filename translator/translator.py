@@ -34,6 +34,7 @@ class MangaTranslator:
             "bing": self._translate_with_bing,
             "nllb": self._translate_with_nllb,
             "gemini": self._translate_with_gemini,
+            "gemini-pro": self._translate_with_gemini,
             "freellm": self._translate_with_freellm
         }
         # Lazy loading for heavy models
@@ -226,11 +227,13 @@ class MangaTranslator:
                 from .gemini_translator import GeminiTranslator
                 api_key = getattr(self, '_gemini_api_key', None) or self.gemini_api_key
                 custom_prompt = getattr(self, '_gemini_custom_prompt', None)
+                gemini_model = getattr(self, '_gemini_model', 'gemini-flash-latest')
                 self._gemini_translator = GeminiTranslator(
                     api_key=api_key, 
-                    custom_prompt=custom_prompt
+                    custom_prompt=custom_prompt,
+                    model=gemini_model
                 )
-                print(f"Gemini translator initialized! (source={self.source}, target={self.target})")
+                print(f"Gemini translator initialized with model: {gemini_model} (source={self.source}, target={self.target})")
             
             return self._gemini_translator.translate_single(
                 text, 
