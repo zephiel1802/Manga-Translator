@@ -49,7 +49,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     const freellmSettings = document.getElementById('freellm-settings');
 
                     copilotSettings.style.display = (translatorText === 'Local LLM') ? 'block' : 'none';
-                    geminiSettings.style.display = (translatorText.startsWith('Gemini') || ocrText === 'Gemini-Vision') ? 'block' : 'none';
+                    geminiSettings.style.display = translatorText.startsWith('Gemini') ? 'block' : 'none';
                     freellmSettings.style.display = (translatorText === 'FreeLLM' || ocrText === 'FreeLLM-Vision') ? 'block' : 'none';
                 }
 
@@ -120,7 +120,7 @@ document.addEventListener("DOMContentLoaded", () => {
                             const freellmSettings = document.getElementById('freellm-settings');
                             
                             copilotSettings.style.display = (translatorText === 'Local LLM') ? 'block' : 'none';
-                            geminiSettings.style.display = (translatorText.startsWith('Gemini') || ocrText === 'Gemini-Vision') ? 'block' : 'none';
+                            geminiSettings.style.display = translatorText.startsWith('Gemini') ? 'block' : 'none';
                             freellmSettings.style.display = (translatorText === 'FreeLLM' || ocrText === 'FreeLLM-Vision') ? 'block' : 'none';
                         }
                     }
