@@ -127,6 +127,9 @@ class GoogleVisionOCR:
         is_vertical = self.ocr_language in ("zh", "ja", "ko")
         
         # Collect all symbols with their positions from all blocks
+        # detected_break types: SPACE=1, SURE_SPACE=2, EOL_SURE_SPACE=3,
+        #                       HYPHEN=4, LINE_BREAK=5
+        SPACE_BREAKS = {1, 2, 3, 5}  # break types that mean "insert space after"
         all_symbols = []
         for page in annotation.pages:
             for block in page.blocks:
@@ -138,7 +141,15 @@ class GoogleVisionOCR:
                             cy = sum(v.y for v in vertices) / 4
                             w = abs(vertices[1].x - vertices[0].x) if vertices[1].x != vertices[0].x else abs(vertices[2].x - vertices[3].x)
                             h = abs(vertices[3].y - vertices[0].y) if vertices[3].y != vertices[0].y else abs(vertices[2].y - vertices[1].y)
-                            
+
+                            # Read word-break hint from Google Vision
+                            break_type = 0
+                            try:
+                                if symbol.property and symbol.property.detected_break:
+                                    break_type = symbol.property.detected_break.type_
+                            except Exception:
+                                pass
+
                             all_symbols.append({
                                 "text": symbol.text,
                                 "cx": cx,
@@ -146,6 +157,7 @@ class GoogleVisionOCR:
                                 "w": max(w, 1),
                                 "h": max(h, 1),
                                 "vertices": [(v.x, v.y) for v in vertices],
+                                "space_after": break_type in SPACE_BREAKS,
                             })
         
         if not all_symbols:
@@ -235,13 +247,21 @@ class GoogleVisionOCR:
         rows.append(current_row)
         
         # Within each row, sort left-to-right by X
+        # Use detected_break hints to restore spaces between words.
         result_parts = []
         for row in rows:
             row.sort(key=lambda s: s["cx"])
-            row_text = ''.join(s["text"] for s in row)
-            result_parts.append(row_text)
-        
-        return ''.join(result_parts)
+            chars = []
+            for i, s in enumerate(row):
+                chars.append(s["text"])
+                # Add space after this symbol if Google Vision flagged a break
+                # (but not after the very last symbol of the row)
+                if s.get("space_after") and i < len(row) - 1:
+                    chars.append(" ")
+            result_parts.append(''.join(chars))
+
+        # Join rows with a space (each row = a visual line of text)
+        return ' '.join(result_parts)
     
     def __call__(self, image) -> str:
         """

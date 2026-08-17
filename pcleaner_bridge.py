@@ -12,20 +12,10 @@ import numpy as np
 from pathlib import Path
 from PIL import Image, ImageFilter
 
-# Add PanelCleanerZ to path
-PCLEANER_ROOT = Path(__file__).parent.parent / "PanelCleanerZ"
-if not PCLEANER_ROOT.exists():
-    # Try common locations
-    for candidate in [
-        Path(r"c:\Users\zephi\Downloads\VibeCodes\PanelCleanerZ"),
-        Path(__file__).parent / "PanelCleanerZ",
-    ]:
-        if candidate.exists():
-            PCLEANER_ROOT = candidate
-            break
-
-if str(PCLEANER_ROOT) not in sys.path:
-    sys.path.insert(0, str(PCLEANER_ROOT))
+# Add local comic_text_detector (copied from PanelCleanerZ) to path
+CTD_ROOT = Path(__file__).parent
+if str(CTD_ROOT) not in sys.path:
+    sys.path.insert(0, str(CTD_ROOT))
 
 
 # Default model path
@@ -68,7 +58,7 @@ class PanelCleanerBridge:
             )
         
         print(f"Loading Comic Text Detector model from {self.model_path}...")
-        from pcleaner.comic_text_detector.inference import TextDetector
+        from comic_text_detector.inference import TextDetector
         self._model = TextDetector(
             model_path=self.model_path,
             input_size=1024,
@@ -111,7 +101,7 @@ class PanelCleanerBridge:
         """
         self._ensure_model()
         
-        from pcleaner.comic_text_detector.utils.textmask import REFINEMASK_ANNOTATION
+        from comic_text_detector.utils.textmask import REFINEMASK_ANNOTATION
         
         mask, mask_refined, blk_list = self._model(
             image_cv, 

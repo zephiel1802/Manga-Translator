@@ -66,6 +66,7 @@ call :check_pkg openai openai
 call :check_pkg google.protobuf protobuf
 call :check_pkg pytesseract pytesseract
 call :check_pkg paddleocr paddleocr
+call :check_pkg simple_lama_inpainting simple-lama-inpainting
 :: PanelCleanerZ deps (used by pcleaner_bridge.py)
 call :check_pkg pyclipper pyclipper
 call :check_pkg shapely shapely
@@ -108,6 +109,7 @@ call :verify_pkg openai openai
 call :verify_pkg google.protobuf protobuf
 call :verify_pkg pytesseract pytesseract
 call :verify_pkg paddleocr paddleocr
+call :verify_pkg simple_lama_inpainting simple-lama-inpainting
 call :verify_pkg pyclipper pyclipper
 call :verify_pkg shapely shapely
 call :verify_pkg scipy scipy
@@ -133,6 +135,49 @@ if %VERIFY_FAIL% GTR 0 (
 :: Also sync with requirements file for any new additions
 echo [INFO] Syncing with requirements-windows.txt...
 pip install -q -r requirements-windows.txt 2>nul
+
+:: =============================================================
+:: Real-ESRGAN NCNN Binary (for image upscaling)
+:: =============================================================
+set "NCNN_BIN=%~dp0bin\realesrgan-ncnn-vulkan.exe"
+if not exist "%NCNN_BIN%" (
+    echo.
+    echo [INFO] realesrgan-ncnn-vulkan not found. Downloading...
+
+    set "NCNN_VERSION=20220424"
+    set "NCNN_TAG=v0.2.5.0"
+    set "NCNN_URL=https://github.com/xinntao/Real-ESRGAN/releases/download/%NCNN_TAG%/realesrgan-ncnn-vulkan-%NCNN_VERSION%-windows.zip"
+    set "NCNN_ZIP=%~dp0bin\realesrgan-ncnn-vulkan.zip"
+
+    if not exist "%~dp0bin" mkdir "%~dp0bin"
+    echo [INFO] Downloading from: %NCNN_URL%
+
+    :: Try PowerShell download
+    powershell -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%NCNN_URL%' -OutFile '%NCNN_ZIP%' -UseBasicParsing } catch { exit 1 }" 2>nul
+    if not errorlevel 1 (
+        echo [INFO] Extracting...
+        powershell -Command "Expand-Archive -Path '%NCNN_ZIP%' -DestinationPath '%~dp0bin' -Force" 2>nul
+        del /f /q "%NCNN_ZIP%" 2>nul
+
+        :: Check if binary exists (may be in subdirectory)
+        if exist "%NCNN_BIN%" (
+            echo [OK] realesrgan-ncnn-vulkan.exe ready.
+        ) else (
+            :: Search in subdirectories
+            for /r "%~dp0bin" %%f in (realesrgan-ncnn-vulkan.exe) do (
+                echo [OK] realesrgan-ncnn-vulkan.exe ready: %%f
+                goto :ncnn_done
+            )
+            echo [WARNING] Binary not found after extraction.
+        )
+    ) else (
+        echo [WARNING] Download failed. Upscale feature will not be available.
+        del /f /q "%NCNN_ZIP%" 2>nul
+    )
+) else (
+    echo [OK] realesrgan-ncnn-vulkan.exe is ready.
+)
+:ncnn_done
 
 echo.
 echo [INFO] Starting Manga Translator...

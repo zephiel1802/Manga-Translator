@@ -60,8 +60,23 @@
                </div>
             </div>
 
-            <!-- Row 2: Translator & Style -->
+            <!-- Row 2: Pipeline Mode & Translator -->
             <div class="select-wrapper">
+               <label class="translator-label">Pipeline Mode</label>
+               <div class="custom-select" id="pipeline_mode" tabindex="0">
+                  <div class="select-box">
+                     <span class="selected"></span>
+                     <span class="icon">&#9660;</span>
+                  </div>
+                  <div class="options">
+                     <span class="option">Gemini Full (Banana 🍌)</span>
+                     <span class="option">Gemini Hybrid</span>
+                     <span class="option">Classic</span>
+                  </div>
+               </div>
+            </div>
+
+            <div class="select-wrapper" id="translator_wrapper">
                <label class="translator-label">Translator</label>
                <div class="custom-select" id="translator" tabindex="0">
                   <div class="select-box">
@@ -69,7 +84,8 @@
                      <span class="icon">&#9660;</span>
                   </div>
                   <div class="options">
-                     <span class="option">Gemini</span>
+                     <span class="option">Gemini Flash</span>
+                     <span class="option">Gemini Pro</span>
                      <span class="option">FreeLLM</span>
                      <span class="option">Local LLM</span>
                      <span class="option">Google</span>
@@ -101,7 +117,7 @@
             </div>
 
             <!-- Row 3: Font & OCR -->
-            <div class="select-wrapper">
+            <div class="select-wrapper" id="font_wrapper">
                <label class="translator-label">Font</label>
                <div class="custom-select" id="font" tabindex="0">
                   <div class="select-box">
@@ -138,7 +154,7 @@
                </div>
             </div>
 
-            <div class="select-wrapper">
+            <div class="select-wrapper" id="ocr_wrapper">
                <label class="translator-label">OCR Engine</label>
                <div class="custom-select" id="ocr" tabindex="0">
                   <div class="select-box">
@@ -154,6 +170,18 @@
                      <span class="option">Manga-OCR</span>
                   </div>
                </div>
+            </div>
+         </div>
+
+         <!-- Gemini Workers Setting (show when Gemini Full or Hybrid selected) -->
+         <div id="gemini-workers-settings" style="display: none; width: 100%;">
+            <div class="select-wrapper full-width" style="margin-top: 10px;">
+               <label class="translator-label">Concurrent Workers</label>
+               <input type="number" id="gemini_workers" name="gemini_workers" min="1" max="5" value="3"
+                  style="width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px;">
+               <small id="gemini-workers-note" style="color: #2ecc71; font-size: 12px; margin-top: 4px; display: none;">
+                  ✨ Gemini sẽ tự động xử lý toàn bộ: OCR → Xóa chữ → Dịch → Chèn chữ
+               </small>
             </div>
          </div>
 
@@ -181,6 +209,15 @@
                <input type="checkbox" id="split_long_images" name="split_long_images">
                <span class="toggle-slider"></span>
                <span class="toggle-label">✂️ Cắt ảnh dài (tự động chia ảnh dài thành nhiều phần, phù hợp manhwa/webtoon)</span>
+            </label>
+         </div>
+
+         <!-- Upscale Image Toggle -->
+         <div class="select-wrapper full-width" style="margin-top: 10px;">
+            <label class="toggle-container">
+               <input type="checkbox" id="upscale_image" name="upscale_image">
+               <span class="toggle-slider"></span>
+               <span class="toggle-label">🔍 Upscale ảnh (Real-ESRGAN — làm sắc nét ảnh mờ trước khi dịch, tốn thêm thời gian)</span>
             </label>
          </div>
 
@@ -260,6 +297,7 @@
          </label>
          <div id="file-list" class="file-list"></div>
 
+         <input type="hidden" id="selected_pipeline_mode" name="selected_pipeline_mode">
          <input type="hidden" id="selected_source_lang" name="selected_source_lang">
          <input type="hidden" id="selected_language" name="selected_language">
          <input type="hidden" id="selected_translator" name="selected_translator">
@@ -288,9 +326,20 @@
 
       <img id="loading-img" src="{{ url_for('static', filename='img/loading.gif') }}" alt="">
       <p id="loading-p">Đang xử lý... Vui lòng đợi!</p>
+
+      <!-- Async Results Container (populated via Socket.IO) -->
+      <div id="async-results" style="display: none;">
+         <h2 class="results-title" id="results-title">🔄 Đang dịch...</h2>
+         <div class="image-gallery" id="results-gallery"></div>
+         <div class="buttons_image" id="results-buttons" style="display: none;">
+            <a href="#" class="green" id="download-zip-async">📦 Download ZIP</a>
+            <a href="/" class="red" onclick="localStorage.removeItem('active_session')">← Quay lại</a>
+         </div>
+      </div>
    </div>
 
    <!-- Socket.IO for real-time progress -->
+   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
    <script>
@@ -405,47 +454,6 @@
             });
          }
 
-         // Show progress when form submitted
-         document.querySelector('form').addEventListener('submit', function (e) {
-            e.preventDefault();
-            
-            if (!updateHiddenInputs()) {
-               return;
-            }
-
-            progressContainer.style.display = 'block';
-            progressBar.style.width = '0%';
-            progressBar.style.background = 'linear-gradient(90deg, #5E1675, #8e44ad)';
-            progressText.textContent = 'Khởi tạo...';
-            progressPhase.textContent = '⏳ Chuẩn bị';
-
-            const formData = new FormData(this);
-            fetch('/translate', {
-               method: 'POST',
-               body: formData
-            })
-            .then(response => {
-               if (response.redirected) {
-                  window.location.href = response.url;
-                  return null;
-               }
-               return response.text();
-            })
-            .then(html => {
-               if (html) {
-                  document.open();
-                  document.write(html);
-                  document.close();
-               }
-            })
-            .catch(err => {
-               alert("Lỗi: " + err);
-               document.getElementById('loading-img').style.display = 'none';
-               document.getElementById('loading-p').style.display = 'none';
-               document.querySelector('form').style.display = 'block';
-               progressContainer.style.display = 'none';
-            });
-         });
       });
    </script>
 </body>

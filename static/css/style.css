@@ -329,6 +329,21 @@ button:active {
 	background: #3da85c;
 }
 
+.retry-page-btn {
+	background: #e67e22;
+	color: white;
+	padding: 8px 12px;
+	border-radius: 6px;
+	text-decoration: none;
+	font-size: 14px;
+	transition: background 0.2s;
+	cursor: pointer;
+}
+
+.retry-page-btn:hover {
+	background: #d35400;
+}
+
 .buttons_image {
 	display: flex;
 	justify-content: center;
