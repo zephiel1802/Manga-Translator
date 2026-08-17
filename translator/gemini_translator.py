@@ -47,13 +47,13 @@ class GeminiTranslator(BaseTranslator):
             api_key: Gemini API key. If None, tries env var, then service account JSON.
             custom_prompt: Custom instructions for translation style.
             style: Preset style name from STYLE_PRESETS.
-            model: Gemini model ID. Defaults to "gemini-flash-latest".
-                   Use "gemini-pro-latest" for higher quality translations.
+            model: Gemini model ID. Defaults to "gemini-2.5-flash".
+                   Use "gemini-2.5-pro" for higher quality translations.
         """
         super().__init__(custom_prompt=custom_prompt, style=style)
         
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.model = model or "gemini-flash-latest"
+        self.model = model or "gemini-2.5-flash"
         
         if self.api_key:
             # Auth method 1: API key (Google AI Studio)

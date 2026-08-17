@@ -40,7 +40,7 @@ class GeminiVisionOCR:
         """
         self.ocr_language = ocr_language
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.model = "gemini-flash-latest"
+        self.model = "gemini-2.5-flash"
         
         if self.api_key:
             self.client = genai.Client(api_key=self.api_key)
@@ -142,9 +142,9 @@ Return ONLY the JSON array, nothing else. Example format:
 ]"""
 
         try:
-            # We use gemini-pro-latest for better spatial understanding, though flash might work
+            # We use gemini-2.5-pro for better spatial understanding, though flash might work
             response = self.client.models.generate_content(
-                model="gemini-pro-latest",
+                model="gemini-2.5-pro",
                 contents=[prompt, image]
             )
             text = response.text.strip()

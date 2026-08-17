@@ -311,7 +311,7 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
                 from translator.gemini_translator import GeminiTranslator
                 api_key = getattr(manga_translator, '_gemini_api_key', None)
                 custom_prompt = getattr(manga_translator, '_gemini_custom_prompt', None)
-                gemini_model = getattr(manga_translator, '_gemini_model', 'gemini-flash-latest')
+                gemini_model = getattr(manga_translator, '_gemini_model', 'gemini-2.5-flash')
                 manga_translator._gemini_translator = GeminiTranslator(
                     api_key=api_key, 
                     custom_prompt=custom_prompt,
@@ -1729,9 +1729,9 @@ def upload_file():
     if selected_translator in ("gemini", "gemini-pro") and gemini_api_key:
         manga_translator._gemini_api_key = gemini_api_key
     if selected_translator == "gemini-pro":
-        manga_translator._gemini_model = "gemini-pro-latest"
+        manga_translator._gemini_model = "gemini-2.5-pro"
     elif selected_translator == "gemini":
-        manga_translator._gemini_model = "gemini-flash-latest"
+        manga_translator._gemini_model = "gemini-2.5-flash"
 
     if selected_translator == "freellm" and style:
         manga_translator._freellm_custom_prompt = style
@@ -2022,7 +2022,7 @@ def upload_file():
                 from translator.gemini_translator import GeminiTranslator
                 api_key = gemini_api_key or None  # Let GeminiTranslator handle fallback
                 custom_prompt = getattr(manga_translator, '_gemini_custom_prompt', None)
-                gemini_model = getattr(manga_translator, '_gemini_model', 'gemini-flash-latest')
+                gemini_model = getattr(manga_translator, '_gemini_model', 'gemini-2.5-flash')
                 manga_translator._gemini_translator = GeminiTranslator(
                     api_key=api_key,
                     custom_prompt=custom_prompt,
@@ -2353,7 +2353,7 @@ def extract_text():
         try:
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-flash-latest")
+            model = genai.GenerativeModel("gemini-2.5-flash")
             # Build a compact payload
             payload_lines = []
             for i, p in enumerate(pages_in, start=1):
