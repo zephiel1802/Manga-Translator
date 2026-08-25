@@ -103,7 +103,7 @@
                      <span class="selected"></span>
                      <span class="icon">&#9660;</span>
                   </div>
-                  <div class="options">
+                  <div class="options" id="style-options">
                      <span class="option">Default</span>
                      <span class="option">Casual (thân mật)</span>
                      <span class="option">Formal (trang trọng)</span>
@@ -112,9 +112,31 @@
                      <span class="option">Action (ngắn gọn)</span>
                      <span class="option">Literal (sát nghĩa)</span>
                      <span class="option">Custom...</span>
+                     <!-- Saved prompts will be injected here by script below -->
                   </div>
                </div>
             </div>
+            <script>
+               // Inject saved custom prompts before app.js binds click listeners
+               (function() {
+                  try {
+                     const savedStr = localStorage.getItem('saved_custom_prompts');
+                     if (savedStr) {
+                        const savedPrompts = JSON.parse(savedStr);
+                        const optionsContainer = document.getElementById('style-options');
+                        for (const name in savedPrompts) {
+                           const span = document.createElement('span');
+                           span.className = 'option';
+                           span.textContent = 'Custom: ' + name;
+                           span.setAttribute('data-is-saved-prompt', 'true');
+                           // Add a delete button inside the option (using outerHTML trick or click propagation)
+                           // Actually, let's just make it selectable.
+                           optionsContainer.appendChild(span);
+                        }
+                     }
+                  } catch (e) { console.error(e); }
+               })();
+            </script>
 
             <!-- Row 3: Font & OCR -->
             <div class="select-wrapper" id="font_wrapper">
@@ -221,6 +243,15 @@
             </label>
          </div>
 
+         <!-- Auto Level Image Toggle -->
+         <div class="select-wrapper full-width" style="margin-top: 10px;">
+            <label class="toggle-container">
+               <input type="checkbox" id="auto_level" name="auto_level" checked>
+               <span class="toggle-slider"></span>
+               <span class="toggle-label">✨ Tăng sáng trang truyện (Làm sạch nền xám, giúp nét vẽ và chữ rõ ràng hơn)</span>
+            </label>
+         </div>
+
          <!-- SFX filter (Extract Text Only) -->
          <div class="select-wrapper full-width" style="margin-top: 10px;">
             <label class="toggle-container">
@@ -232,9 +263,55 @@
 
          <!-- Custom Prompt (show when Custom selected) -->
          <div class="select-wrapper full-width" id="custom-prompt-wrapper" style="display: none;">
-            <label class="translator-label">Custom Prompt</label>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+               <label class="translator-label" style="margin-bottom: 0;">Custom Prompt</label>
+               <div style="display: flex; gap: 5px;" id="save-prompt-controls">
+                  <input type="text" id="custom_prompt_name" placeholder="Tên prompt..." style="padding: 3px 8px; font-size: 12px; border-radius: 4px; border: 1px solid #555; background: #222; color: white; width: 120px;">
+                  <button type="button" id="save-prompt-btn" onclick="saveCustomPrompt()" style="padding: 3px 10px; font-size: 12px; cursor: pointer; background: #5E1675; border: none; border-radius: 4px; color: white; transition: background 0.2s;">Lưu</button>
+                  <button type="button" id="delete-prompt-btn" onclick="deleteCustomPrompt()" style="display: none; padding: 3px 10px; font-size: 12px; cursor: pointer; background: #e74c3c; border: none; border-radius: 4px; color: white; transition: background 0.2s;">Xóa</button>
+               </div>
+            </div>
             <textarea id="custom_prompt" name="custom_prompt"
                placeholder="Ví dụ: Dịch theo phong cách light novel, giữ nguyên tên nhân vật..." rows="2"></textarea>
+            
+            <script>
+               function getSavedPrompts() {
+                  try {
+                     return JSON.parse(localStorage.getItem('saved_custom_prompts')) || {};
+                  } catch (e) { return {}; }
+               }
+               
+               function saveCustomPrompt() {
+                  const nameInput = document.getElementById('custom_prompt_name');
+                  const promptInput = document.getElementById('custom_prompt');
+                  const name = nameInput.value.trim();
+                  const prompt = promptInput.value.trim();
+                  
+                  if (!name) return alert("Vui lòng nhập tên prompt để lưu!");
+                  if (!prompt) return alert("Vui lòng nhập nội dung prompt!");
+                  
+                  const saved = getSavedPrompts();
+                  saved[name] = prompt;
+                  localStorage.setItem('saved_custom_prompts', JSON.stringify(saved));
+                  
+                  alert("Đã lưu prompt: " + name + "\n(Vui lòng tải lại trang để thấy trong danh sách)");
+                  // Optionally could reload page here to refresh the dropdown
+                  window.location.reload();
+               }
+               
+               function deleteCustomPrompt() {
+                  const nameInput = document.getElementById('custom_prompt_name');
+                  const name = nameInput.value.trim();
+                  if (!name) return;
+                  
+                  if (confirm("Bạn có chắc chắn muốn xóa prompt: " + name + "?")) {
+                     const saved = getSavedPrompts();
+                     delete saved[name];
+                     localStorage.setItem('saved_custom_prompts', JSON.stringify(saved));
+                     window.location.reload();
+                  }
+               }
+            </script>
          </div>
 
          <!-- Local LLM Settings (show when Local LLM selected) -->
