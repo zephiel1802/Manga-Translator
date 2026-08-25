@@ -156,6 +156,16 @@ class PanelCleanerBridge:
         cleaned = image_cv.copy()
         h, w = cleaned.shape[:2]
         
+        # Calculate dynamic scale based on image resolution (assume baseline is 1000px)
+        scale = max(1.0, max(h, w) / 1000.0)
+        base_dilate = max(3, int(3 * scale))
+        if base_dilate % 2 == 0:
+            base_dilate += 1
+            
+        lama_dilate_size = max(5, int(5 * scale))
+        if lama_dilate_size % 2 == 0:
+            lama_dilate_size += 1
+        
         # Ensure mask is proper binary
         _, mask_binary = cv2.threshold(mask_refined, 127, 255, cv2.THRESH_BINARY)
         
@@ -179,7 +189,7 @@ class PanelCleanerBridge:
                 continue
             
             # Dilate the mask slightly to cover edge artifacts
-            dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilate, base_dilate))
             block_mask_dilated = cv2.dilate(block_mask, dilate_kernel, iterations=1)
             
             # Check if background is uniform by analyzing border pixels
@@ -197,7 +207,8 @@ class PanelCleanerBridge:
         if np.sum(lama_mask) > 0:
             if self._ensure_lama():
                 # Dilate LaMa mask more for better results
-                lama_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                lama_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (lama_dilate_size, lama_dilate_size))
+                # Number of iterations could also scale, but increasing kernel size is enough
                 lama_mask = cv2.dilate(lama_mask, lama_dilate, iterations=2)
                 cleaned = self._lama.inpaint(cleaned, lama_mask)
             else:
@@ -243,10 +254,6 @@ class PanelCleanerBridge:
         
         # Calculate median color
         median_color = np.median(border_pixels, axis=0).astype(np.uint8)
-        
-        # Round near-white to pure white
-        if all(c > 230 for c in median_color):
-            median_color = np.array([255, 255, 255], dtype=np.uint8)
         
         return tuple(int(c) for c in median_color), is_uniform
     

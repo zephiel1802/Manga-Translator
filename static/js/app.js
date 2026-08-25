@@ -32,8 +32,31 @@ document.addEventListener("DOMContentLoaded", () => {
                 // Show/hide custom prompt textarea
                 if (selectBox.id === 'style') {
                     const customWrapper = document.getElementById('custom-prompt-wrapper');
+                    const promptNameInput = document.getElementById('custom_prompt_name');
+                    const promptTextarea = document.getElementById('custom_prompt');
+                    const deleteBtn = document.getElementById('delete-prompt-btn');
+                    
                     if (option.textContent.includes('Custom')) {
                         customWrapper.style.display = 'block';
+                        
+                        // Check if it's a saved prompt
+                        if (option.hasAttribute('data-is-saved-prompt')) {
+                            const promptName = option.textContent.replace('Custom: ', '');
+                            try {
+                                const saved = JSON.parse(localStorage.getItem('saved_custom_prompts') || '{}');
+                                if (saved[promptName]) {
+                                    promptTextarea.value = saved[promptName];
+                                    if (promptNameInput) promptNameInput.value = promptName;
+                                    if (deleteBtn) deleteBtn.style.display = 'inline-block';
+                                }
+                            } catch (e) {}
+                        } else {
+                            // Regular 'Custom...' option
+                            if (promptNameInput && option.textContent === 'Custom...') {
+                                promptNameInput.value = '';
+                                if (deleteBtn) deleteBtn.style.display = 'none';
+                            }
+                        }
                     } else {
                         customWrapper.style.display = 'none';
                     }

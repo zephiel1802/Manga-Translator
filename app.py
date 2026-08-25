@@ -600,9 +600,25 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                 avg_bg = (bg_r + bg_g + bg_b) / 3
                 bubble_is_dark = avg_bg < 128
                 
+                # Expand coords for rendering to give horizontal text more room in vertical bubbles
+                render_x1, render_y1, render_x2, render_y2 = x1, y1, x2, y2
+                if blk.get('vertical', False) or (y2-y1) > (x2-x1) * 1.2:
+                    # Expand width to be closer to height (make it square-ish)
+                    target_w = y2 - y1
+                    pad_w = max(0, target_w - (x2-x1)) // 2
+                    render_x1 = max(0, x1 - pad_w)
+                    render_x2 = min(w, x2 + pad_w)
+                    
+                    # Slight vertical padding
+                    pad_h = max(10, int((y2-y1) * 0.05))
+                    render_y1 = max(0, y1 - pad_h)
+                    render_y2 = min(h, y2 + pad_h)
+                    
+                cleaned_region = cleaned_image[render_y1:render_y2, render_x1:render_x2]
+                
                 # Use the cleaned region directly
                 detected_color = (int(bg_b), int(bg_g), int(bg_r))  # RGB -> BGR
-                cont = np.array([[[0, 0]], [[0, y2-y1]], [[x2-x1, y2-y1]], [[x2-x1, 0]]], dtype=np.int32)
+                cont = np.array([[[0, 0]], [[0, render_y2-render_y1]], [[render_x2-render_x1, render_y2-render_y1]], [[render_x2-render_x1, 0]]], dtype=np.int32)
                 
                 # Check if outside bubble (complex background)
                 _, is_uniform = _pcleaner._analyze_block_background(
@@ -614,7 +630,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
                 bubble_data.append({
                     'detected_image': cleaned_region.copy(),
                     'contour': cont,
-                    'coords': (x1, y1, x2, y2),
+                    'coords': (render_x1, render_y1, render_x2, render_y2),
                     'is_dark': bubble_is_dark,
                     'fill_color': detected_color,
                     'requires_stroke': requires_stroke,
@@ -963,7 +979,9 @@ def run_translation_job(job, sid=None):
     font_path = job['font_path']
     split_long_images = job['split_long_images']
     upscale_image = job['upscale_image']
+    auto_level = job.get('auto_level', False)
     gemini_api_key = job['gemini_api_key']
+    custom_prompt = job.get('custom_prompt', '')
     
     total = len(saved_files)
     _active_jobs[session_id] = {'status': 'running', 'total': total, 'completed': 0, 'error': ''}
@@ -1040,6 +1058,32 @@ def run_translation_job(job, sid=None):
             
             image = cv2.imread(img_data['path'])
             original = cv2.imread(img_data['original_path'])
+            
+            # --- Optional: Auto Level (Clean dirty background) ---
+            if auto_level:
+                emit_gemini_progress(i, total, f'Trang {i+1}/{total}: Làm trắng nền...')
+                def apply_auto_level(img):
+                    # Clip black and white points to remove gray casts
+                    # A typical manga page has dark ink and white paper.
+                    # We can use a simple threshold or normalization.
+                    # Since color manga exists, we do it carefully per channel.
+                    out = img.astype(np.float32)
+                    
+                    # Compute 1st and 99th percentiles for contrast stretching
+                    p2, p98 = np.percentile(out, (2, 95))
+                    
+                    # Stretch contrast
+                    out = (out - p2) * (255.0 / max(1.0, (p98 - p2)))
+                    
+                    # Push near-whites to pure white (cleans the paper)
+                    out = np.where(out > 220, 255.0, out)
+                    
+                    return np.clip(out, 0, 255).astype(np.uint8)
+                
+                image = apply_auto_level(image)
+                original = apply_auto_level(original)
+                print(f"  ✓ Auto leveled page {i+1}")
+
             
             # --- Optional: Upscale blurry images ---
             print(f"  [DEBUG] upscale_image={upscale_image}, UPSCALER_AVAILABLE={UPSCALER_AVAILABLE}")
@@ -1259,7 +1303,10 @@ Translation rules:
 - Historical terms: Sino-Vietnamese (皇帝→Hoàng đế, 公公→Công Công)
 - SFX: translate naturally"""
 
-                translate_prompt += "\n\nReturn ONLY the JSON array."
+                if custom_prompt:
+                    translate_prompt += f"\n\n=== USER CUSTOM PROMPT / STYLE / DICTIONARY ===\n{custom_prompt}\n============================================="
+
+                translate_prompt += "\n\nReturn ONLY the JSON array (or JSON object as requested by user)."
                 
                 try:
                     from google.genai import types
@@ -1297,21 +1344,38 @@ Translation rules:
                             else:
                                 raise je
                     
-                    print(f"  ✓ Gemini translated {len(translations)} regions")
+                    # Robust parsing for JSON dict or array
+                    trans_list = []
+                    if isinstance(translations, dict):
+                        # Find the first value that is a list
+                        for k, v in translations.items():
+                            if isinstance(v, list):
+                                trans_list = v
+                                break
+                    elif isinstance(translations, list):
+                        trans_list = translations
+                    
+                    print(f"  ✓ Gemini translated {len(trans_list)} regions")
                     
                     # Map translations to detected blocks
                     trans_map = {}
-                    for t in translations:
-                        rid = t.get('region_id', 0)
+                    for t in trans_list:
+                        # Support both region_id and box_id (in case user overrides in custom prompt)
+                        rid = t.get('region_id')
+                        if rid is None:
+                            rid = t.get('box_id', 0)
+                        
                         orig = t.get('original_text', '')
                         trans = t.get('translated_text', '')
-                        trans_map[rid] = trans
+                        trans_map[int(rid)] = trans
                         print(f"    Region {rid}:")
                         print(f"      原文: {orig}")
                         print(f"      Dịch: {trans}")
                     
                 except Exception as e:
                     print(f"  ⚠️ Gemini translation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     import traceback
                     traceback.print_exc()
                     trans_map = {}
@@ -1339,42 +1403,37 @@ Translation rules:
                         
                         # --- Expand narrow vertical boxes for horizontal text ---
                         is_vert = blk.get('vertical', False)
-                        min_width = 100  # Minimum width for readable horizontal text
                         
-                        if bw < min_width and bh > bw * 1.5:
-                            # Need to expand width
-                            needed = min_width - bw
-                            # Try expanding both sides equally
-                            expand_left = needed // 2
-                            expand_right = needed - expand_left
-                            
-                            new_x1 = max(0, x1 - expand_left)
-                            new_x2 = min(img_w, x2 + expand_right)
-                            
-                            # Check overlap with OTHER blocks
-                            overlap = False
-                            for k, other_coords in enumerate(all_coords):
-                                if k == j:
-                                    continue
-                                ox1, oy1, ox2, oy2 = other_coords
-                                # Check if expanded box overlaps other block
-                                if new_x1 < ox2 and new_x2 > ox1 and y1 < oy2 and y2 > oy1:
-                                    overlap = True
-                                    break
-                            
-                            if not overlap:
-                                # Fill expanded area with background
-                                bg_color = blk.get('bg_color', (255, 255, 255))
-                                # Fill left expansion
-                                if new_x1 < x1:
-                                    cv2.rectangle(image, (new_x1, y1), (x1, y2), bg_color, -1)
-                                # Fill right expansion
-                                if new_x2 > x2:
-                                    cv2.rectangle(image, (x2, y1), (new_x2, y2), bg_color, -1)
+                        # Target a more square-like aspect ratio for vertical text
+                        if is_vert or bh > bw * 1.5:
+                            target_w = int(bh * 0.85)  # Make it almost a square
+                            if bw < target_w:
+                                needed = target_w - bw
+                                # Try expanding both sides equally
+                                expand_left = needed // 2
+                                expand_right = needed - expand_left
                                 
-                                x1, x2 = new_x1, new_x2
-                                bw = x2 - x1
-                                print(f"    ↔ Expanded to {bw}x{bh}")
+                                new_x1 = max(0, x1 - expand_left)
+                                new_x2 = min(img_w, x2 + expand_right)
+                                
+                                # Check overlap with OTHER blocks
+                                overlap = False
+                                for k, other_coords in enumerate(all_coords):
+                                    if k == j:
+                                        continue
+                                    ox1, oy1, ox2, oy2 = other_coords
+                                    # Check if expanded box overlaps other block
+                                    if new_x1 < ox2 and new_x2 > ox1 and y1 < oy2 and y2 > oy1:
+                                        overlap = True
+                                        break
+                                
+                                if not overlap:
+                                    # DO NOT fill with solid color! Just expand the rendering area.
+                                    # This preserves the background art (speedlines, hair, gradients)
+                                    # and the text stroke will ensure readability.
+                                    x1, x2 = new_x1, new_x2
+                                    bw = x2 - x1
+                                    print(f"    ↔ Expanded rendering box to {bw}x{bh}")
                         
                         # Use PanelCleanerZ's detected colors
                         bg_color = blk.get('bg_color', (255, 255, 255))
@@ -1630,6 +1689,9 @@ def upload_file():
 
     # Get upscale setting (checkbox - "on" if checked, None if not)
     upscale_image = request.form.get("upscale_image") == "on"
+    
+    # Get auto level setting
+    auto_level = request.form.get("auto_level") == "on"
 
     # Get font selection
     selected_font_raw = request.form["selected_font"]
@@ -1949,7 +2011,9 @@ def upload_file():
                     'font_path': get_font_path(selected_font),
                     'split_long_images': split_long_images,
                     'upscale_image': upscale_image,
+                    'auto_level': auto_level,
                     'gemini_api_key': gemini_api_key,
+                    'custom_prompt': style,
                 }
                 
                 return jsonify({'status': 'started', 'session_id': session_id, 'total': len(saved_files)})
